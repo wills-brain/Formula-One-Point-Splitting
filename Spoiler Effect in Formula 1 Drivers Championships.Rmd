@@ -1,0 +1,1770 @@
+---
+title: "Spoiler Effect in Formula 1 Driver's Championships"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+subtitle: S&DS 2300 Final Project Report
+author: "John Jay Wang, William Shiu"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.cap = NULL)
+options(scipen = 999)
+```
+
+## Introduction
+
+In Formula 1, there are two annual championships every year, the World Driver's Championship (WDC), and the World Constructor's Championship (WCC). The World Driver's Championship is awarded to the highest-scoring driver, and the World Constructor's Championship is awarded to the team with the highest combined points across its two drivers. In 2025, McLaren clinched the WCC by such a margin where no rival could catch up to them with six races remaining. Classical fan intuition holds that this kind of constructor dominance should produce a lopsided performance in the WDC. However, in this case, Verstappen, of Red Bull Racing, in a car widely considered inferior to McLaren's by 150 WCC points, sat only two points behind the WDC leader, while McLaren's principal faced criticism for "papaya rules," letting its two drivers Lando Norris and Oscar Piastri race freely, with consequences including including the Singapore Grand Prix collision and the Monza pit-stop controversy. Last month, Nico Rosberg, the 2016 WDC champion who shared a Mercedes garage with Hamilton during a similarly dominant run, told a Yale audience that engineering dominance does not translate cleanly to driver dominance because of psychological and point pressures inside the team. There have been cases of this in other sports that have been studied more into depth, for instance "superteams" in the NBA, where star teammates collide and are able to succeed. This phenomena has not been examined in F1 with statistical rigor. This project first establishes how strong is the WCC-to-WDC dominance translation is, before inquiring what explains the failure in translation in seasons where it WCC dominance does not translate into WDC dominance. We find fan tuition is largely correct clear where WCC performance translates to WDC driver dominance, which is defined by gap between the highest performing driver on the winning constructor and the next highest performing driver on a non-winning constructor (r = 0.71 across 67 seasons). It then investigate why the translation-failure seasons occurs, finding that this phenomenon is characterized by closely-matched teammates inside the dominant constructor, where high parity causing points split between them, and neither runs away with the WDC rather than behavioral, where driver pace relative to personal baselines degrades under teammate pressure. The data analyzed includes data from 67 WCC seasons (1958–2024), with cleaned identifiers across drivers, constructors, race results, championship standings, lap times, etc.
+
+## 1) Data Cleaning
+
+Before beginning analysis, we had to extensively clean our data and mutate raw data into new variables that would be applicable to the problem. First, we created a function that we would apply to all of our loaded files to remove NA values (expressed in the dataset as "\N"), and then we converted all the character columns with numeric values into numeric columns. We created a function converting all laptimes from a Minutes:Seconds:Milliseconds format into a seconds format, for easier analysis, and then also merged the race statistics across datasets using each of their unique `raceid`.
+
+We then considered rebrands of teams and their names over the years (same constructor but different sponsors). We researched what constructors were duplicated under different identifies due to rebrands, and used a function to unify all of them under a common `constructorID`. We also had to filter the 1950-2024 data to 1958-2024, since those were the only years the WCC existed. Finally, we extracted the final-season standings and total points per season. We printed the number of NA values at the end, returning both 0s, to confirm that our cleaning worked.
+
+```{r}
+results               <- read.csv("archive-3/results.csv",               stringsAsFactors = FALSE)
+driver_standings      <- read.csv("archive-3/driver_standings.csv",      stringsAsFactors = FALSE)
+constructor_standings <- read.csv("archive-3/constructor_standings.csv", stringsAsFactors = FALSE)
+races                 <- read.csv("archive-3/races.csv",                 stringsAsFactors = FALSE)
+qualifying            <- read.csv("archive-3/qualifying.csv",            stringsAsFactors = FALSE)
+constructors          <- read.csv("archive-3/constructors.csv",          stringsAsFactors = FALSE)
+
+# Replace "\N" character strings with NA across all loaded files
+clean_na <- function(df) { df[df == "\\N"] <- NA; df }
+results               <- clean_na(results)
+driver_standings      <- clean_na(driver_standings)
+constructor_standings <- clean_na(constructor_standings)
+races                 <- clean_na(races)
+qualifying            <- clean_na(qualifying)
+
+# Convert numeric columns stored as character
+results$position     <- as.numeric(results$position)
+results$grid         <- as.numeric(results$grid)
+results$milliseconds <- as.numeric(results$milliseconds)
+results$points       <- as.numeric(results$points)
+driver_standings$points        <- as.numeric(driver_standings$points)
+driver_standings$position      <- as.numeric(driver_standings$position)
+constructor_standings$points   <- as.numeric(constructor_standings$points)
+constructor_standings$position <- as.numeric(constructor_standings$position)
+
+# Convert qualifying lap times from M:SS.mmm into seconds
+time_to_seconds <- function(x) {
+  mins <- as.numeric(gsub(":.*", "", x))
+  secs <- as.numeric(gsub(".*:", "", x))
+  mins * 60 + secs
+}
+qualifying$q1_sec <- time_to_seconds(qualifying$q1)
+qualifying$q2_sec <- time_to_seconds(qualifying$q2)
+qualifying$q3_sec <- time_to_seconds(qualifying$q3)
+
+# Merge race year/round
+races_slim <- races[, c("raceId", "year", "round")]
+results               <- merge(results,               races_slim, by = "raceId")
+driver_standings      <- merge(driver_standings,      races_slim, by = "raceId")
+constructor_standings <- merge(constructor_standings, races_slim, by = "raceId")
+qualifying            <- merge(qualifying,            races_slim, by = "raceId")
+
+# Filter to seasons in which the WCC existed (1958-2024)
+results               <- results[results$year >= 1958 & results$year <= 2024, ]
+driver_standings      <- driver_standings[driver_standings$year >= 1958 & driver_standings$year <= 2024, ]
+constructor_standings <- constructor_standings[constructor_standings$year >= 1958 & constructor_standings$year <= 2024, ]
+qualifying            <- qualifying[qualifying$year >= 1958 & qualifying$year <= 2024, ]
+races                 <- races[races$year >= 1958 & races$year <= 2024, ]
+
+# Constructor lineages — rebrands listed under different IDs but same franchise.
+constructor_id_map <- c(
+  "172"=32,"173"=32,"176"=32,"177"=32,"180"=32,"201"=32,           # Lotus
+  "181"=34,"182"=34,"183"=34,"191"=34,"204"=34,                     # Brabham
+  "167"=87,"168"=87,"169"=87,"170"=87,"171"=87,"178"=87,
+  "186"=87,"192"=87,"195"=87,                                       # Cooper
+  "22"=4,"208"=4,"214"=4,                                           # Renault
+  "5"=213,"215"=213,                                                # AlphaTauri
+  "10"=211                                                          # Racing Point
+)
+apply_name_map <- function(df) {
+  id_str  <- as.character(df$constructorId)
+  matched <- id_str %in% names(constructor_id_map)
+  df$constructorId[matched] <- constructor_id_map[id_str[matched]]
+  df <- merge(df, constructors[, c("constructorId", "name")], by = "constructorId", all.x = TRUE)
+  df$constructor_name <- df$name; df$name <- NULL
+  df
+}
+results               <- apply_name_map(results)
+constructor_standings <- apply_name_map(constructor_standings)
+qualifying            <- apply_name_map(qualifying)
+
+# Extract final-season standings (last round of each year)
+max_round_per_year <- tapply(races$round, races$year, max)
+final_round <- data.frame(year      = as.numeric(names(max_round_per_year)),
+                          max_round = as.numeric(max_round_per_year))
+driver_standings_final      <- merge(driver_standings,      final_round, by = "year")
+driver_standings_final      <- subset(driver_standings_final, round == max_round)
+constructor_standings_final <- merge(constructor_standings, final_round, by = "year")
+constructor_standings_final <- subset(constructor_standings_final, round == max_round)
+
+# Total points per season (used to normalize across scoring-system eras)
+season_total_points <- tapply(driver_standings_final$points, driver_standings_final$year, sum, na.rm = TRUE)
+season_total_points <- data.frame(year        = as.numeric(names(season_total_points)),
+                                  totalpoints = as.numeric(season_total_points))
+
+sum(is.na(driver_standings_final[, c("points", "position")]))
+sum(is.na(constructor_standings_final[, c("points", "position")]))
+```
+
+## 2) Variable Construction
+
+```{r}
+years_list <- sort(unique(constructor_standings_final$year))
+table_a <- data.frame(
+  year = years_list,
+  wcc_team_id = NA, wcc_p1_points = NA, wcc_p2_points = NA,
+  wdc_p1_id = NA, wdc_p1_points = NA, wdc_p2_id = NA, wdc_p2_points = NA,
+  driver1_id = NA, driver2_id = NA, driver1_points = 0, driver2_points = 0
+)
+for (i in 1:nrow(table_a)) {
+  yr <- table_a$year[i]
+  cs_year <- constructor_standings_final[constructor_standings_final$year == yr, ]
+  table_a$wcc_team_id[i]   <- cs_year$constructorId[cs_year$position == 1]
+  table_a$wcc_p1_points[i] <- cs_year$points[cs_year$position == 1]
+  table_a$wcc_p2_points[i] <- cs_year$points[cs_year$position == 2]
+  ds_year <- driver_standings_final[driver_standings_final$year == yr, ]
+  table_a$wdc_p1_id[i]     <- ds_year$driverId[ds_year$position == 1]
+  table_a$wdc_p1_points[i] <- ds_year$points[ds_year$position == 1]
+  table_a$wdc_p2_id[i]     <- ds_year$driverId[ds_year$position == 2]
+  table_a$wdc_p2_points[i] <- ds_year$points[ds_year$position == 2]
+  team_rows <- results[results$year == yr & results$constructorId == table_a$wcc_team_id[i], ]
+  top2 <- as.numeric(names(sort(table(team_rows$driverId), decreasing = TRUE)))[1:2]
+  table_a$driver1_id[i] <- top2[1]
+  table_a$driver2_id[i] <- top2[2]
+  d1_pts <- driver_standings_final$points[driver_standings_final$year == yr & driver_standings_final$driverId == top2[1]]
+  d2_pts <- driver_standings_final$points[driver_standings_final$year == yr & driver_standings_final$driverId == top2[2]]
+  if (length(d1_pts) > 0) table_a$driver1_points[i] <- d1_pts
+  if (length(d2_pts) > 0) table_a$driver2_points[i] <- d2_pts
+}
+table_a <- merge(table_a, season_total_points, by = "year")
+table_a$constructor_dominance <- (table_a$wcc_p1_points - table_a$wcc_p2_points) / table_a$totalpoints
+table_a$teammate_parity       <- abs(table_a$driver1_points - table_a$driver2_points) / table_a$totalpoints
+
+# wdc_margin redefined as EXTERNAL WDC margin: WDC P1's points minus the
+# highest-scoring driver from a NON-WCC-winning team, normalized. This isolates
+# the gap to an external rival from intra-team teammate splits, dissolving the
+# tautology that arises when both WCC drivers finish WDC top 2 (~27% of seasons).
+# Each driver is mapped to their primary constructor (most race entries) for
+# the season; the highest-scoring driver outside the WCC team becomes "external P2".
+table_a$wdc_margin <- NA
+for (i in 1:nrow(table_a)) {
+  yr   <- table_a$year[i]
+  team <- table_a$wcc_team_id[i]
+  ds   <- driver_standings_final[driver_standings_final$year == yr, ]
+  driver_team <- tapply(results$constructorId[results$year == yr],
+                        results$driverId[results$year == yr],
+                        function(x) as.numeric(names(sort(table(x), decreasing = TRUE)))[1])
+  ds$primary_team <- driver_team[as.character(ds$driverId)]
+  ext <- ds[!is.na(ds$primary_team) & ds$primary_team != team, ]
+  ext <- ext[order(-ext$points), ]
+  if (nrow(ext) >= 1) {
+    table_a$wdc_margin[i] <- (table_a$wdc_p1_points[i] - ext$points[1]) /
+                              table_a$totalpoints[i]
+  }
+}
+
+table_a$intra_team_battle <- 0
+for (i in 1:nrow(table_a)) {
+  yr <- table_a$year[i]
+  d1 <- table_a$driver1_id[i]; d2 <- table_a$driver2_id[i]
+  top3_ids <- driver_standings_final$driverId[
+    driver_standings_final$year == yr & driver_standings_final$position <= 3
+  ]
+  if (d1 %in% top3_ids & d2 %in% top3_ids) table_a$intra_team_battle[i] <- 1
+}
+
+table_a$era <- "Pre-1980"
+table_a$era[table_a$year >= 1980 & table_a$year < 2000] <- "1980-1999"
+table_a$era[table_a$year >= 2000 & table_a$year < 2010] <- "2000-2009"
+table_a$era[table_a$year >= 2010] <- "2010-2024"
+table_a$era <- factor(table_a$era, levels = c("Pre-1980", "1980-1999", "2000-2009", "2010-2024"))
+
+# Best qualifying time per row
+qualifying$best_sec <- NA
+for (i in 1:nrow(qualifying)) {
+  times <- c(qualifying$q1_sec[i], qualifying$q2_sec[i], qualifying$q3_sec[i])
+  times <- times[!is.na(times)]
+  if (length(times) > 0) qualifying$best_sec[i] <- min(times)
+}
+pole_per_race <- tapply(qualifying$best_sec, qualifying$raceId, min, na.rm = TRUE)
+pole_df <- data.frame(raceId = as.numeric(names(pole_per_race)), pole_sec = as.numeric(pole_per_race))
+qualifying <- merge(qualifying, pole_df, by = "raceId")
+qualifying$gap_to_pole <- qualifying$best_sec - qualifying$pole_sec
+
+quali_b <- qualifying[qualifying$year >= 1994 & !is.na(qualifying$gap_to_pole), ]
+quali_b$key <- paste(quali_b$driverId, quali_b$year, sep = "_")
+unique_keys <- unique(quali_b$key)
+
+table_b <- data.frame(driverId = NA, year = NA, quali_gap_to_pole = NA,
+                      constructorId = NA, teammate_id = NA, teammate_threat = 0)
+table_b <- table_b[0, ]
+for (k in unique_keys) {
+  rows <- quali_b[quali_b$key == k, ]
+  did <- rows$driverId[1]; yr <- rows$year[1]
+  mean_gap <- mean(rows$gap_to_pole, na.rm = TRUE)
+  driver_rows <- results[results$year == yr & results$driverId == did, ]
+  if (nrow(driver_rows) == 0) next
+  primary_cid <- as.numeric(names(sort(table(driver_rows$constructorId), decreasing = TRUE)))[1]
+  team_rows <- results[results$year == yr & results$constructorId == primary_cid, ]
+  mate_ids <- as.numeric(names(sort(table(team_rows$driverId), decreasing = TRUE)))
+  mate_ids <- mate_ids[mate_ids != did]
+  mate <- NA; threat <- 0
+  if (length(mate_ids) > 0) {
+    mate <- mate_ids[1]
+    mate_pos <- driver_standings_final$position[driver_standings_final$year == yr & driver_standings_final$driverId == mate]
+    if (length(mate_pos) > 0 && !is.na(mate_pos) && mate_pos <= 3) threat <- 1
+  }
+  table_b <- rbind(table_b, data.frame(
+    driverId = did, year = yr, quali_gap_to_pole = mean_gap,
+    constructorId = primary_cid, teammate_id = mate, teammate_threat = threat
+  ))
+}
+table_b$driver_baseline_quali <- NA
+for (i in 1:nrow(table_b)) {
+  did <- table_b$driverId[i]; yr <- table_b$year[i]
+  other <- table_b[table_b$driverId == did & table_b$year != yr, ]
+  if (nrow(other) >= 1) table_b$driver_baseline_quali[i] <- mean(other$quali_gap_to_pole, na.rm = TRUE)
+}
+table_b <- table_b[!is.na(table_b$driver_baseline_quali), ]
+table_b$quali_underperform <- 0
+table_b$quali_underperform[table_b$quali_gap_to_pole > table_b$driver_baseline_quali] <- 1
+table_b <- merge(table_b, table_a[, c("year", "constructor_dominance", "era")], by = "year", all.x = TRUE)
+```
+
+After our data was cleaned, we had to create some of our own metrics to use for data analysis, to answer our two questions. We consolidated data across the multiple dataframes into two analysis tables. For table A, we pull the constructor champion points, the runner-up team's points, the two principal drivers on the WCC team, the top WDC finishers, and then we use that data to compute `constructor_dominance`, `teammate_parity`, and `wdc_margin`, which are explained below.
+
+For table B, we compute each driver's mean qualifying gap to pole that season, their main teammate, and flagged if the teammate finished WDC top 3 (indicating intra-team pressure). Then, we build their career baseline qualifying gap using an average across their other seasons, and we also flag any seasons where their gap exceeds that baseline.
+
+-   **`raceId`** *(identifier)*: unique numeric key for each race, used as the primary merge key across results, standings, qualifying, and race metadata files
+-   **`constructorId`** *(identifier)*: unique numeric key for each constructor, unified across rebrands via a manual lineage map, used as the primary merge key linking constructor standings and race results
+-   **`wdc_margin`** *(continuous)*: WDC P1 points minus highest-scoring driver from a non-WCC-winning team, normalized by total season points (external WDC margin)
+-   **`constructor_dominance`** *(continuous)*: WCC P1 − P2 points, normalized by total season points
+-   **`teammate_parity`** *(continuous)*: \|driver1_points − driver2_points\| within the WCC team, normalized based on total points in the championship. Note that higher teammate parity indicates one driver significantly outscored the other, while lower teammate parity indicates the two drivers scored more similarly, splitting the points pool between them.
+-   **`dom_x_parity`** *(continuous)*: constructor_dominance × teammate_parity (interaction)
+-   **`high_parity`** *(binary)*: 1 if season's parity is at or below the median (closely matched teammates)
+-   **`era`** *(categorical)*: Pre-1980, 1980–1999, 2000–2009, 2010–2024
+-   **`quali_gap_to_pole`** *(continuous)*: driver's mean qualifying gap to pole (seconds) for the season
+-   **`driver_baseline_quali`** *(continuous)*: driver's mean qualifying gap across their other seasons in the panel
+-   **`quali_underperform`** *(binary)*: 1 if `quali_gap_to_pole` exceeds the driver's own career baseline
+-   **`teammate_threat`** *(binary)*: 1 if the driver's teammate finished WDC top 3 that season
+
+## 3) Exploratory Data Analysis
+
+```{r}
+library(corrplot)
+eda_vars <- table_a[, c("constructor_dominance", "teammate_parity", "wdc_margin")]
+plot(eda_vars, pch = 19, cex = .7, col = "red",
+     main = "Matrix Plot of Continuous Predictors and WDC Margin")
+```
+
+**Figure 1a (Matrix plot of continuous predictors and WDC margin)**
+
+```{r}
+sigcorr <- cor.mtest(eda_vars, conf.level = .95)
+corrplot.mixed(cor(eda_vars),
+               lower.col = "black", upper = "ellipse",
+               tl.col = "black", number.cex = .8,
+               tl.pos = "lt", tl.cex = .7,
+               p.mat = sigcorr$p, sig.level = .05)
+summary(table_a[, c("constructor_dominance", "wdc_margin", "teammate_parity")])
+```
+
+**Figure 1b (Correlation matrix with significance overlay)**
+
+We created pairwise scatterplots and correlation matricies over three of the continuous variables that we wanted to use for analysis: `constructor_dominance`, `teammate_parity`, and `wdc_margin`, each normalized by total season points, so we could make the different seasons with different scoring systems comparable.
+
+From figure 1a, The top-right scatterplot gives `constructor_dominance` vs. `wdc_margin`, shows a positive correlation, showing that generally fan intuition is correct, in that better engineering for the car helps increases the margin in which that team wins by. The middle-right scatterplot gives `teammate_parity` vs. `wdc_margin` visually shows a very slight positive relationship, showing that the within-team competition structure might include information that could explain the performance margin that the contructor dominance doesn't show. The top-middle graph gives `constructor_dominance` vs. `teammate_parity` shows close to no association, showing that the two predictors are not redundant and can be both used without worries of multicollinearity.
+
+From the figure 1b, the correlation matrix, we get that for `constructor_dominance` vs. `wdc_margin`, we have the strongest positive correlation, with a value of 0.71, while `teammate_parity` vs. `wdc_margin` gives a lower but still statistically significant correlation of 0.36. Even more important, however, is the fact that `constructor_dominance` vs. `teammate_parity` returned a statistically insignificant correlation, meaning that the two have basically no dependence on each other, futher backing up our claims that they are unrelated and can be used as two separate variables without fears of multicolinearity.
+
+## 4) Graphics 
+
+```{r}
+myCor <- function(x, y, xlab = "X", ylab = "Y", title = ""){
+  plot(x, y, pch = 19, col = "red", xlab = xlab, ylab = ylab, main = title)
+  mtext(paste("Sample Correlation =", round(cor(x, y), 3)), side = 3, cex = 1.1)
+}
+myCor(table_a$constructor_dominance, table_a$wdc_margin,
+      xlab = "Constructor Dominance (WCC P1 - P2 points)",
+      ylab = "WDC Margin (WDC P1 - P2 points)",
+      title = "Constructor Dominance vs. WDC Margin")
+abline(lm(wdc_margin ~ constructor_dominance, data = table_a),
+       col = "blue", lwd = 2, lty = 2)
+legend("topleft", legend = "Fit", col = "blue", lty = 2, lwd = 2, bty = "n")
+```
+
+**Figure 2a (Scatterplot of constructor dominance vs. WDC margin)**
+
+Here, we take the 67 WCC winning seasons, and each year appears as a point with constructor dominance on the x-axis, and WDC margin on the y-axis. We created the regression fit line and displayed it as the blue dashed line, which supports the fan intuition that increasing constructor dominance increases WDC margin. The sample correlation here measures the engineering to driver relationship.
+
+The graph shows that the fit is steep and positive, meaning that dominant constructors usually produce dominant drivers, and with a pearson coefficient value of 0.714 and an R² of about 0.51, about half of the variance in the title margin is explained by the constructor dominance. However, we are still unsure about the remaining 49% of variance, and so we need to investigate why cases fall above or below the fit line.
+
+```{r}
+# Compute residuals from the simple WCC->WDC model (the "fan intuition" model)
+# and define translation-failure seasons. Class 13 residual diagnostic logic:
+# if residuals correlate with an unused predictor, that predictor belongs in the model.
+simple_mod <- lm(wdc_margin ~ constructor_dominance, data = table_a)
+table_a$resid_simple <- residuals(simple_mod)
+table_a$translation_failed <- factor(ifelse(table_a$resid_simple < 0,
+                                            "Failed", "Succeeded"),
+                                     levels = c("Failed", "Succeeded"))
+
+# Keep parity_label for any downstream reference.
+parity_median <- median(table_a$teammate_parity, na.rm = TRUE)
+table_a$high_parity <- ifelse(table_a$teammate_parity <= parity_median, 1, 0)
+table_a$parity_label <- factor(table_a$high_parity, levels = c(0, 1),
+                               labels = c("Low Parity", "High Parity"))
+
+# Diagnostic: residuals from the simple model vs. teammate parity (the unused predictor).
+myCor(table_a$teammate_parity, table_a$resid_simple,
+      xlab = "Teammate Parity (normalized points gap within WCC team)",
+      ylab = "Residual: actual minus predicted WDC margin",
+      title = "Residuals vs. Teammate Parity for 'Failures' in the Simple Model")
+abline(h = 0, col = "blue", lwd = 2, lty = 2)
+abline(lm(resid_simple ~ teammate_parity, data = table_a),
+       col = "green", lwd = 2)
+legend("topright", c("Zero residual", "Fit on residuals"),
+       col = c("blue", "green"), lty = c(2, 1), lwd = 2, bty = "n")
+```
+
+**Figure 2b (Residual diagnostic)**
+
+This scatterplot takes `teammate_parity` the residuals from all the seasons, and plots them against the residuals from the WDC margins from before. We plotted an green fit line for the residuals, and also a Blue zero residual line from figure 3a. Here, we see that the model underpredicts WDC margin when teammates are far apart from points, but overpredicts when teammates are closely matched, showing that the cases from figure 3a that have negative residuals are the same seasons where the dominant team's two drivers split points evenly.
+
+We define seasons with a negative residual, meaning the actual WDC margin fell below what constructor dominance alone predicted, as translation failures, while seasons with a non-negative residual as successes.
+
+```{r}
+# Figure 4 uses translation_failed (defined above) as the grouping variable.
+boxplot(teammate_parity ~ translation_failed, data = table_a,
+        col = c("red", "blue"),
+        names = c("Translation Failed (residual < 0)",
+                  "Translation Succeeded (residual >= 0)"),
+        ylab = "Teammate Parity (normalized points gap within WCC team)",
+        xlab = "",
+        main = "Teammate Parity in Translation Failures vs. Successes")
+```
+
+**Figure 3 (Boxplot of teammate parity in translation failures vs. successes).**
+
+Building off of figure 3a and 3b, we closely examine the "failure" and "success" cases, and compare the teammate parity in each of them. From these boxplots, the failure cases are associated with much lower teammate parity than the success cases, and we have visual evidence that generally when teammates split points evenly, neither of them runaway to win the WDC. However, we don't have a p-valuem confidence intervals or tests to prove that just yet.
+
+```{r}
+hist(table_a$teammate_parity, breaks = 15,
+     col = "blue",
+     xlab = "Teammate Parity (normalized points gap within WCC team)",
+     main = "Distribution of Teammate Parity Across WCC-Winning Seasons")
+abline(v = median(table_a$teammate_parity, na.rm = TRUE),
+       col = "red", lty = 2, lwd = 2)
+legend("topright", legend = "Median", col = "red", lty = 2, lwd = 2, bty = "n")
+```
+
+**Figure 4 (Histogram of teammate parity across WCC-winning seasons)**
+
+The histogram shows the distribution of our normalized `teammate_parity` statistic across the WCC-winning seasons. We see that the range is from 0.00 to 0.24, with a median of around 0.07. This shows a slight right skew, with the majority of teammate parities falling towards 0.00 and 0.15, and only a couple of extreme values.
+
+```{r}
+library(car)
+qqp(table_a$wdc_margin, pch = 19, col = "blue",
+    ylab = "wdc_margin",
+    main = "Normal Quantile Plot for WDC Margin")
+```
+
+**Figure 5 (Normal quantile plot of WDC margin)**
+
+The normal quantile plot for `wdc_margin` shows that the majority of the data falls under a normal distribution, with just two departures visible - the lower-tail (which happens becaue the WDC margin is bounded at 0), and the slight upper-tail. These are not extremely severe departures, so we continued with our Pearson correlation, Welch t-test, and linear regression.
+
+## 5) Basic Tests
+
+### 5a) Correlation: WCC margin vs WDC margin
+
+```{r}
+cor_test <- cor.test(table_a$constructor_dominance, table_a$wdc_margin)
+cor_test
+obs_cor    <- cor_test$estimate
+obs_cor_ci <- cor_test$conf.int
+```
+
+This correlation test shows that higher `constructor_dominance` usually means a higher `wdc_margin`, and since the p-value is extremely below 0.05, the 0.71 correlation is statistically significant. We saw this with the correlation matrix earlier, and the general fan intuition holds true.
+
+### 5b) Two-sample t-test: teammate parity in translation failures vs. successes
+
+```{r}
+parity_failed   <- table_a$teammate_parity[table_a$translation_failed == "Failed"]
+parity_succeed  <- table_a$teammate_parity[table_a$translation_failed == "Succeeded"]
+t_result <- t.test(parity_failed, parity_succeed)
+t_result
+```
+
+This Welch's Two sample t-test compares the mean of `teammate_parity` between the earlier cases of "fail" seasons and "success" seasons, finding here that the mean `teammate_parity` for failed seasons is approximately 0.0496, while the mean of success seasons is 0.1164 (p \< 0.05), such that the difference between the mean `teammate_parity` between the two groups is statistically significant.
+
+### 5c) Bootstrap CI for the correlation
+
+```{r}
+set.seed(2300)
+N <- nrow(table_a); n_samp <- 10000
+boot_cor <- rep(NA, n_samp)
+for (i in 1:n_samp) {
+  s <- sample(1:N, N, replace = TRUE)
+  boot_cor[i] <- cor(table_a$constructor_dominance[s], table_a$wdc_margin[s])
+}
+ci_r <- quantile(boot_cor, c(.025, .975))
+
+hist(boot_cor, col = "blue", breaks = 50,
+     main = "Bootstrapped Correlations: Constructor Dominance vs WDC Margin",
+     xlab = "Sample Correlation")
+abline(v = ci_r,        lwd = 3, col = "red")
+abline(v = obs_cor_ci,  lwd = 3, col = "green", lty = 2)
+legend("topleft", c("Theoretical CI", "Boot CI"),
+       col = c("green", "red"), lty = c(2, 1), lwd = 3, bty = "n")
+```
+
+**Figure 6 (Bootstrap distribution of the correlation)**
+
+We produce a bootstrapped 95% confidence interval of correlation of `constructor_dominance` and `wdc_margin`from 10,000 trials, which was plotted on a histogram of sample correlations with the theoretical confidence intervals, from which the two intervals are observed to be extremely similar, such that the positive correlation between `constructor_dominance` and `wdc_margin` is established with both parametric and non-parametric uncertainty qualification.
+
+## 6) Permutation Tests
+
+### 6a) Permutation test for the correlation
+
+```{r}
+permCor <- function(x, y, n_samp = 10000, plotit = T){
+  corResults <- rep(NA, n_samp)
+  for (i in 1:n_samp){ corResults[i] <- cor(x, sample(y)) }
+  pval <- mean(abs(corResults) >= abs(cor(x, y)))
+  if (plotit){
+    hist(corResults, col = "yellow", breaks = 50, main = "",
+         xlab = "Permuted Correlations",
+         xlim = range(corResults, cor(x, y)))
+    mtext("Permuted Sample Correlations", cex = 1.2, line = 1)
+    mtext(paste0("Permuted P-value = ", round(pval, 4),
+                 ", Calculated P-value = ", round(cor.test(x, y)$p.value, 4)),
+          cex = 0.8, line = 0)
+    abline(v = cor(x, y), col = "blue", lwd = 3)
+    text(cor(x, y) * 1.1, 0,
+         paste("Actual Correlation =", round(cor(x, y), 2)),
+         srt = 90, adj = 0)
+  } else { return(round(pval, 5)) }
+}
+permCor(table_a$constructor_dominance, table_a$wdc_margin)
+```
+
+**Figure 7 (Permutation test for the correlation)**
+
+The permutation test for the sample correlations confirms the results from earlier, with the observed statistic indicated by the blue line, and a p-value of 0 (below alpha = 0.05), so we know that the calculated correlation between `constructor_dominance` and `wdc_margin` is significant.
+
+### 6b) Permutation test for the parity-in-failure-seasons
+
+```{r}
+set.seed(2300)
+N <- 10000
+actualdiff <- mean(parity_failed) - mean(parity_succeed)
+group_vec  <- as.numeric(table_a$translation_failed == "Failed")
+diffvals <- rep(NA, N)
+for (i in 1:N) {
+  fakegroup <- sample(group_vec)
+  diffvals[i] <- mean(table_a$teammate_parity[fakegroup == 1]) -
+                 mean(table_a$teammate_parity[fakegroup == 0])
+}
+p_perm <- mean(abs(diffvals) >= abs(actualdiff))
+
+hist(diffvals, col = "yellow",
+     main = "Permuted Differences in Teammate Parity (Failed - Succeeded)",
+     xlab = "Difference in Mean Teammate Parity",
+     breaks = 50,
+     xlim = range(diffvals, actualdiff, -actualdiff))
+abline(v = actualdiff, col = "blue", lwd = 3)
+text(actualdiff - 0.002, 300,
+     paste("Actual Diff in Means =", round(actualdiff, 4)),
+     srt = 90)
+mtext(paste("Two-sided permutation p-value =", round(p_perm, 5)),
+      side = 3, line = 0, cex = .8)
+obs_diff <- actualdiff
+```
+
+**Figure 8 (Permutation test for the failure-case)**
+
+This permutation test tests the significance of our difference in mean `teammate_parity` between the success and fail cases and returns a non-parametric p-value that agrees with the parametric t-test p-value from earlier (p-value \< 0.05), so we conclude that failure seasons have lower teammate parity.
+
+## 7) Multiple Regression
+
+Multiple Regression Plan: For multiple regression, we'll try to model the WDC margin as a function of constructor dominance, teammate parity, their interaction, and era dummies. The interaction `constructor_dominance` vs `teammate_parity` is the central test of the conditional redistribution mechanism: under that hypothesis, parity should compress WDC margins more strongly when the constructor is dominant, because there is no external rival to absorb redistributed points. We also create "eras", from 1980-1999, 2000-2009, and 2010-2024 to see if the eras that these races are taking place (difference in scoring changes, reliablity differences, field sizes, technology), have any effect on the result. Predictors are selected by best subsets regression, evaluating all combinations and reports BIC, adjusted R², and Mallows' Cp.Before fitting the final model we examine Cook's distances to identify influential observations, address outliers via indicator variable rather than deletion to preserve all 67 degrees of freedom, and verify the absence of multicollinearity via variance inflation factors. We also conducted a Box-Cox transformation analysis to assess whether a power transformation of wdc_margin would improve model fit (lambda = 0.62), but the transformed model yielded a lower adjusted R² than the untransformed specification and is less interpretable, so the raw scale was used in the final model.
+
+```{r}
+table_a$dom_x_parity <- table_a$constructor_dominance * table_a$teammate_parity
+era_dummies <- model.matrix(~ era, data = table_a)[, -1]
+colnames(era_dummies) <- gsub("era", "era_", colnames(era_dummies))
+model_df <- data.frame(
+  wdc_margin            = table_a$wdc_margin,
+  constructor_dominance = table_a$constructor_dominance,
+  teammate_parity       = table_a$teammate_parity,
+  dom_x_parity          = table_a$dom_x_parity,
+  era_dummies
+)
+
+library(leaps)
+mod1 <- regsubsets(wdc_margin ~ ., data = model_df, nvmax = ncol(model_df) - 1)
+mod1sum <- summary(mod1)
+mod1sum
+```
+
+```{r}
+n_bic   <- which.min(mod1sum$bic)
+n_adjr2 <- which.max(mod1sum$adjr2)
+n_cp    <- which.min(mod1sum$cp)
+
+par(mfrow = c(1, 3))
+plot(mod1sum$bic, type = "b", pch = 19, col = "blue",
+     xlab = "# predictors", ylab = "BIC", main = "BIC by Model Size")
+points(n_bic, mod1sum$bic[n_bic], col = "red", pch = 19, cex = 1.5)
+plot(mod1sum$adjr2, type = "b", pch = 19, col = "blue",
+     xlab = "# predictors", ylab = "Adjusted R²", main = "Adjusted R² by Model Size")
+points(n_adjr2, mod1sum$adjr2[n_adjr2], col = "red", pch = 19, cex = 1.5)
+plot(mod1sum$cp, type = "b", pch = 19, col = "blue",
+     xlab = "# predictors", ylab = "Mallows' Cp", main = "Cp by Model Size")
+points(n_cp, mod1sum$cp[n_cp], col = "red", pch = 19, cex = 1.5)
+par(mfrow = c(1, 1))
+
+names(model_df[, names(which(mod1sum$which[n_bic, -1]))])
+```
+
+**Figure 9 (Best-subsets selection criteria)**
+
+We created 3 graphs that show BIC, R\^2, and Mallows' Cp against the \# of predictors, finding that for BIC and Mallows' Cp, the best number of predictors was 4, but for the adjusted R\^2, the best number of predictors was 5, as indicated by us highlighting the best number of predictors on each graph with a red point (min for BIC, max for adj. R\^2, and min for Cp). However, for the adjusted R\^2, the difference between 4 and 5 predictors was not a lot, so we initially decided to opt for 4 predictors, which are printed above (constructor_dominance, teammate_parity, dominance and parity interaction, and era, which is the broader category within which era_1980.1999 exists). However, although best-subsets selected era_1980.1999 specifically, since era is a categorical variable, one cannot include a single level in isolation. The full era factor as a whole was not significant by a Type III test (p = 0.126), so era was excluded from the final model. It is worth nothing that the BIC, R\^2 and Mallows' Cp has a significant difference within adding the first 2 predictors, both related to parity, meaning that those are the most significant predictors, and the rest don't add relatively as much to the model.
+
+```{r}
+# Step 1: Fit a preliminary interaction model to identify outliers via Cook's distance.
+prelim_model <- lm(wdc_margin ~ constructor_dominance * teammate_parity, data = table_a)
+
+plot(cooks.distance(prelim_model), pch = 19, col = "blue",
+     xlab = "Observation Index", ylab = "Cook's D",
+     main = "Cook's Distance for WDC Margin Model")
+abline(h = 4 / nrow(table_a), col = "red", lty = 2, lwd = 2)
+high_cook <- which(cooks.distance(prelim_model) > 4 / nrow(table_a))
+table_a[high_cook, c("year", "constructor_dominance", "teammate_parity", "wdc_margin")]
+vif(lm(wdc_margin ~ constructor_dominance + teammate_parity, data = table_a))
+
+# Step 2: Handle outliers via indicator variable — flag the high-Cook's-D observations
+# (1994 Williams and 2002 Ferrari) with a binary indicator rather than removing them.
+# This retains all 67 observations and preserves degrees of freedom.
+table_a$outlier_indicator <- as.integer(rownames(table_a) %in% as.character(high_cook))
+```
+
+**Figure 10 (Cook's Distance to Diagnose Influential points)**
+
+After computing cook's distances all the observations, we found there to be one major outlier, at observation index 37. After completing research on that observation, we found that that outlier happened due to Ayrton Senna's death midway through the season, as a result of a crash at the San Marino Grand Prix in Italy. So, it is not surprising that that season produced irregular across and within team dynamics. So, we moved forward, creating an indicator variable for that point.
+
+```{r}
+# Step 3: Fit the final model with the outlier indicator included from the start
+# (Class 17 marginality convention: keep both main effects alongside the interaction).
+final_model <- lm(wdc_margin ~ constructor_dominance * teammate_parity + outlier_indicator,
+                  data = table_a)
+summary(final_model)
+confint(final_model)
+Anova(final_model, type = 3)
+```
+
+**Discussion of Final model** The final model includes constructor_dominance, teammate_parity, and their interaction, selected by best subsets regression with BIC, Cp, and adjusted R² as the primary criteria (all agreeing with each other), and an Type III test for the era category that showed it should be excluded from the final model (p = 0.126) despite best subsets selecting era_1980.1999 as part of the optimal model (one paritcular level cannot be included by itself). The model produces an adjusted R² of 0.7467, meaning that roughly 75% of the variation in external WDC margin across 67 seasons is explained by these three terms. constructor_dominance is positive and significant (p \< 0.001), confirming that better cars produce larger championship leads over external rivals. teammate_parity is positive and significant (p \< 0.05), indicating that seasons with a wider intra-team gap also tend to produce larger external margins. This is consistent with the lead driver consolidating points rather than splitting them. The interaction term constructor_dominance × teammate_parity is positive and significant (p = 0.008), indicating that the relationship between constructor advantage and external WDC margin is amplified in seasons where one teammate clearly outscores the other, that is when one driver consolidates the team's points rather than splitting them, the dominant constructor more efficiently converts its car advantage into a larger external WDC lead.
+
+```{r}
+# Inline myResPlots definition 
+myResPlots <- function(model, label){
+  qqp(rstudent(model), pch = 19,
+      main = paste("NQ Plot of Studentized Residuals,", label))
+  plot(rstudent(model) ~ model$fitted.values,
+       pch = 19, col = 'red',
+       xlab = "Fitted Values", ylab = "Studentized Residuals",
+       main = paste("Fits vs. Studentized Residuals,", label))
+  abline(h = 0, lwd = 3)
+  abline(h = c(2, -2), lty = 2, lwd = 2, col = "blue")
+  abline(h = c(3, -3), lty = 2, lwd = 2, col = "green")
+}
+myResPlots(final_model, label = "WDC Margin Model")
+```
+
+**Figure 11 (Discussion of Regression Residuals)**
+
+After creating an indicator variable for the earlier stated outliers, we move on with creating a normal quantile plot and fits vs. studentized residual plot for our data. From our normal quantile plot, while the left tail is slightly longer than atnicipated, since most of the points fall in our blue 95% envelope, we see that normality holds across the distribution From the fits vs residuals plot, we see no curvature (non linear relationship) and no clear megaphone shape (hetersoskedasticity). We can conclude that our model is appropriate and that we can trust the regression output interaction coefficient's standard error and t-statistic, and we don't necessarily need to make any transformations on our data.
+
+We considered a transformation of wdc_margin (lambda = 0.62 according to boxcox) given the slight skew, but found through trial and error that this scale produces a lower R2 model (R2 = 0.52), with lower interpretability. No transformation was applied for these reasons (and the fact that the untransformed data satisfy the normality sufficiently for inference).
+
+```{r}
+set.seed(2300)
+n_samp <- 10000
+boot_int <- rep(NA, n_samp)
+N <- nrow(table_a)
+for (i in 1:n_samp){
+  s <- sample(1:N, N, replace = TRUE)
+  fit_b <- lm(wdc_margin ~ constructor_dominance * teammate_parity, data = table_a[s, ])
+  boot_int[i] <- coef(fit_b)["constructor_dominance:teammate_parity"]
+}
+ci_int <- quantile(boot_int, c(.025, .975), na.rm = TRUE)
+
+hist(boot_int, col = "blue", breaks = 50,
+     main = "Bootstrapped Interaction Coefficient",
+     xlab = "constructor_dominance × teammate_parity")
+abline(v = ci_int, lwd = 3, col = "red")
+abline(v = confint(final_model, "constructor_dominance:teammate_parity"),
+       lwd = 3, col = "green", lty = 2)
+legend("topleft", c("Theoretical CI", "Boot CI"),
+       col = c("green", "red"), lty = c(2, 1), lwd = 3, bty = "n")
+```
+
+**Figure 13 (Bootstrap distribution of the interaction coefficient as conformation of interaction)**
+
+Given the very slight departure from normality observed in the residual plot, we applied bootstrapping as a nonparametric confirmation of the interaction term. We focus on this because it is the paper's central claim and, unlike the main effects, has no corroboration from the earlier correlatio tests and permutation tests in sections 5 and 6.This bootstrap distribution is created by the resampling our 67 season observations, and refitting the interaction model and taking the `constructor_dominance:teammate_parity` coefficient out each time. Since the bootstrapped interval is pretty much overlapping our theoretical confidence interval, our parametric inference was strong, and our bootstrapped interval just confirms this. From this graph, we find that the confidence intervals for the theoretical and bootstrapped are both centered at around 2, and also both clear 0. From this, since the interaction coefficient is positive across nearly the entire distribution, the teammate parity generally has a stronger effect on WDC margin when the constructor is dominant.
+
+## 8) Logistic Regression: Rosberg's Claimed Behavioral Factor
+
+```{r}
+table_b$era <- factor(table_b$era,
+                      levels = c("Pre-1980", "1980-1999", "2000-2009", "2010-2024"))
+table_b_model <- table_b[complete.cases(
+  table_b[, c("quali_underperform", "teammate_threat", "constructor_dominance", "era")]
+), ]
+table_b_model$era <- droplevels(table_b_model$era)
+
+logit_model <- glm(quali_underperform ~ teammate_threat + constructor_dominance + era,
+                   data = table_b_model, family = binomial)
+summary(logit_model)
+
+library(questionr)
+odds.ratio(logit_model)
+
+Anova(logit_model, type = 3)
+
+null_model <- glm(quali_underperform ~ 1, data = table_b_model, family = binomial)
+anova(null_model, logit_model, test = "Chisq")
+```
+
+```{r}
+new_data <- data.frame(
+  constructor_dominance = rep(seq(min(table_b_model$constructor_dominance, na.rm = TRUE),
+                                  max(table_b_model$constructor_dominance, na.rm = TRUE),
+                                  length.out = 100), 2),
+  teammate_threat = rep(c(0, 1), each = 100),
+  era = factor("2010-2024", levels = levels(table_b_model$era))
+)
+new_data$predicted_prob <- predict(logit_model, newdata = new_data, type = "response")
+
+plot(new_data$constructor_dominance[new_data$teammate_threat == 0],
+     new_data$predicted_prob[new_data$teammate_threat == 0],
+     type = "l", col = "blue", lwd = 3, ylim = c(0, 1),
+     xlab = "Constructor Dominance",
+     ylab = "P(Underperforms Qualifying Baseline)",
+     main = "Predicted Probability of Qualifying Underperformance\n(2010-2024 era)")
+lines(new_data$constructor_dominance[new_data$teammate_threat == 1],
+      new_data$predicted_prob[new_data$teammate_threat == 1],
+      col = "red", lwd = 3)
+legend("topright",
+       legend = c("No teammate threat", "Teammate threat"),
+       col = c("blue", "red"), lwd = 3, bty = "n")
+```
+
+**Figure 14 (Predicted probabilities from the logistic regression: behavioral factor)** When Rosberg spoke to Yale students last month and claimed that driver psychology, wherein his teammate Hamilton pressured him, impacted his WDC performance. To test this, we model quali_underperform as a function of teammate_threat, constructor_dominance (controlling for car quality), and era (controlling for scoring systems and field competitiveness across F1 eras). If psychological pressure from a title-threatening teammate hurts a driver's individual pace, we would expect teammate_threat to be a positive predictor of underperformance.
+
+Using the fitted GLM, we evaluate predicted probabilities across the observed range of constructor_dominance for cases with and without teammate threat. We find that at 0.00 constructor dominance, the no threat probability of underperforming is about 0.5, but with a threat, the probability is about 0.05. At higher constructor dominance (0.30), the no threat probability of underperforming increases to 0.7, and is still significantly higher than the with threat probability, which also raises to about 0.2. So overall, the probability that drivers underperform their qualifying baseline is is significantly lower when there is a teammate threat.
+
+From our logistic regression, we get that all three predictors carry statistically meaningful information. We get that the `teammate_threat` coefficient is -2.31, with a p-value of about 2.5x10\^-11, which makes it significant. The `constructor_dominance` coefficient is 2.95l with a p-value of 0.006, which is also significant. Within the eras, only the 2000-2009 indicator is significant. The intercept is non significant, which is expected because when the driver doesn't have a title-threat teammate, has a non-dominant car, the probaability of underperforming is pretty much a 50/50 split, since there's nothing to base it off of.
+
+For the odds ratios, a driver with a title-threat teammate had a 0.1 times the odds of underperforming compared to a driver without one, meaning that the teammate threat decreases the odds of underperforming by about 90%. Here, we ge a reverse teammate-threat result than Rosberg had anticipated.
+
+To check overall likelihood, we compare the residual deviance to the null deviance (intercept only), and we get a chi-squared statistic of 94.4 with a p-value below 2.2x10\^-16, so we can conclude that the model is much better than a model with no predictors.
+
+## 9) Conclusions
+
+Across 67 WCC-winning seasons, constructor dominance is a strong and significant predictor of external WDC margin (r = 0.71, p ≈ 1.2×10⁻¹¹), explaining approximately 51% of the variance, consistent with classical fan intuition. This coefficient was validated via a 95% bootstrapped confidence interval, which overlapped with the parametric confidence interval, and a permutation test, which returned a p-value of 0.
+
+Exploratory analysis of the residuals from the simple constructor dominance model revealed a pattern where seasons in which the actual WDC margin fell below what constructor dominance alone predicted, labeled translation failures, were distinguished from seasons where the actual WDC margin met or exceeded the prediction, labeled successes, by significantly lower teammate points gaps on the WCC winning constructor. Notably, this definition is more nuanced than simply whether the WCC winning constructor produced the WDC champion, as a season can be labeled a failure even if a WCC driver won the WDC if their margin over the best external rival was smaller than constructor dominance alone would have predicted.
+
+A Welch t-test (p = 2.1×10⁻⁷) and permutation test (p \< 0.001) both confirmed that failure seasons have significantly lower teammate parity than success seasons, with mean parity of 0.050 versus 0.116 respectively, motivating the inclusion of teammate parity as a predictor. Best-subsets regression using BIC, Cp, and Adjusted R2 as criteria, in combination with a Type III test showing that eras did not contribute significantly as a wholedespite best-subsets choosing a dummy level, selected constructor dominance, teammate parity, and their interaction as the optimal model, achieving an adjusted R² of 0.747. The positive interaction coefficient of 2.08 (p = 0.008), whose bootstrapped confidence interval fell entirely above zero and overlapped closely with the parametric interval, indicates that point splitting between closely matched teammates suppresses WDC margin most severely when the constructor is dominant.
+
+Finally, to test Rosberg's behavioral hypothesis, we conducted logistic regression to model the probability of a driver underperforming their career qualifying baseline, where drivers with title-threatening teammates were approximately ten times less likely to underperform (OR = 0.099, p ≈ 2.5×10⁻¹¹). The overall model fit was confirmed by a likelihood ratio test against the null deviance (chi-squared = 94.4, p \< 2.2×10⁻¹⁶). We therefore conclude that WDC translation failure is due to a point splitting rather than behavioral.
+
+Some of the limitations we encountered were that the era effects were absorbed by best subsets selection but the assumption that scoring-system normalization fully accounts for cross-era differences, but was not formally tested. Indeed, regulation changes in F1 are notoriously frequent. In addition, qualifying data was restricted, likely due to poor record keeping. This limited the historical scope of the behavioral test to just the modern F1 era 2010-2024.
+
+```{r}
+```{r save-figures-for-latex, results='hide', fig.show='hide'}
+# =============================================================
+# Export all figures to figures/figN_*.pdf for the LaTeX paper.
+# Run AFTER all preceding chunks so derived objects exist:
+#   table_a, simple_mod, final_model, boot_cor, boot_int,
+#   obs_cor_ci, parity_failed/succeed, mod1sum, n_bic/adjr2/cp,
+#   permCor(), diffvals, actualdiff, p_perm, new_data, logit_model
+# =============================================================
+dir.create("figures", showWarnings = FALSE)
+fw <- 7; fh <- 5
+
+# --- Figure 1: scatter matrix ---
+pdf("figures/fig1_scatter_matrix.pdf", width = fw, height = fh)
+plot(table_a[, c("constructor_dominance", "teammate_parity", "wdc_margin")],
+     pch = 19, cex = 0.7, col = "red",
+     main = "Pairwise Scatterplots of Continuous Predictors and WDC Margin")
+dev.off()
+
+# --- Figure 2: correlation matrix with significance ---
+pdf("figures/fig2_corr_matrix.pdf", width = fw, height = fh)
+eda_vars <- table_a[, c("constructor_dominance", "teammate_parity", "wdc_margin")]
+sigcorr  <- corrplot::cor.mtest(eda_vars, conf.level = 0.95)
+corrplot::corrplot.mixed(cor(eda_vars),
+                         lower.col = "black", upper = "ellipse",
+                         tl.col = "black", number.cex = 0.8,
+                         tl.pos = "lt", tl.cex = 0.7,
+                         p.mat = sigcorr$p, sig.level = 0.05)
+dev.off()
+
+# --- Figure 3: constructor dominance vs WDC margin ---
+pdf("figures/fig3_cd_vs_wdc.pdf", width = fw, height = fh)
+plot(table_a$constructor_dominance, table_a$wdc_margin,
+     pch = 19, col = "red",
+     xlab = "Constructor Dominance (WCC P1 - P2 points, normalized)",
+     ylab = "WDC Margin (normalized)",
+     main = "Constructor Dominance vs. WDC Margin")
+mtext(paste("Sample Correlation =",
+            round(cor(table_a$constructor_dominance, table_a$wdc_margin), 3)),
+      side = 3, cex = 1.1)
+abline(lm(wdc_margin ~ constructor_dominance, data = table_a),
+       col = "blue", lwd = 2, lty = 2)
+legend("topleft", legend = "Fit", col = "blue", lty = 2, lwd = 2, bty = "n")
+dev.off()
+
+# --- Figure 4: residuals vs teammate parity ---
+pdf("figures/fig4_residuals_vs_parity.pdf", width = fw, height = fh)
+plot(table_a$teammate_parity, table_a$resid_simple,
+     pch = 19, col = "red",
+     xlab = "Teammate Parity (normalized points gap within WCC team)",
+     ylab = "Residual: actual minus predicted WDC margin",
+     main = "Residuals from Simple Model vs. Teammate Parity")
+mtext(paste("Sample Correlation =",
+            round(cor(table_a$teammate_parity, table_a$resid_simple), 3)),
+      side = 3, cex = 1.1)
+abline(h = 0, col = "blue", lwd = 2, lty = 2)
+abline(lm(resid_simple ~ teammate_parity, data = table_a),
+       col = "green", lwd = 2)
+legend("topright", c("Zero residual", "Fit on residuals"),
+       col = c("blue", "green"), lty = c(2, 1), lwd = 2, bty = "n")
+dev.off()
+
+# --- Figure 5: boxplot teammate parity by translation outcome ---
+pdf("figures/fig5_boxplot_failure_success.pdf", width = fw, height = fh)
+boxplot(teammate_parity ~ translation_failed, data = table_a,
+        col = c("red", "blue"),
+        names = c("Translation Failed (residual < 0)",
+                  "Translation Succeeded (residual >= 0)"),
+        ylab = "Teammate Parity (normalized points gap within WCC team)",
+        xlab = "",
+        main = "Teammate Parity by Translation Outcome")
+dev.off()
+
+# --- Figure 6: histogram teammate parity ---
+pdf("figures/fig6_histogram_parity.pdf", width = fw, height = fh)
+hist(table_a$teammate_parity, breaks = 15, col = "blue",
+     xlab = "Teammate Parity (normalized points gap within WCC team)",
+     main = "Distribution of Teammate Parity Across WCC-Winning Seasons")
+abline(v = median(table_a$teammate_parity, na.rm = TRUE),
+       col = "red", lty = 2, lwd = 2)
+legend("topright", legend = "Median", col = "red", lty = 2, lwd = 2, bty = "n")
+dev.off()
+
+# --- Figure 7: bootstrap correlation ---
+pdf("figures/fig7_bootstrap_correlation.pdf", width = fw, height = fh)
+ci_r <- quantile(boot_cor, c(0.025, 0.975))
+hist(boot_cor, col = "blue", breaks = 50,
+     main = "Bootstrapped Correlation: Constructor Dominance vs. WDC Margin",
+     xlab = "Sample Correlation")
+abline(v = ci_r,       lwd = 3, col = "red")
+abline(v = obs_cor_ci, lwd = 3, col = "green", lty = 2)
+legend("topleft", c("Theoretical CI", "Boot CI"),
+       col = c("green", "red"), lty = c(2, 1), lwd = 3, bty = "n")
+dev.off()
+
+# --- Figure 8: permutation test for correlation ---
+pdf("figures/fig8_permutation_correlation.pdf", width = fw, height = fh)
+permCor(table_a$constructor_dominance, table_a$wdc_margin)
+title(main = "Permutation Distribution: Correlation under Null", line = 2.5)
+dev.off()
+
+# --- Figure 9: permutation test for parity difference ---
+pdf("figures/fig9_permutation_failure.pdf", width = fw, height = fh)
+hist(diffvals, col = "yellow",
+     main = "Permuted Differences in Teammate Parity (Failed - Succeeded)",
+     xlab = "Difference in Mean Teammate Parity",
+     breaks = 50,
+     xlim = range(diffvals, actualdiff, -actualdiff))
+abline(v = actualdiff, col = "blue", lwd = 3)
+text(actualdiff - 0.002, 300,
+     paste("Actual Diff in Means =", round(actualdiff, 4)), srt = 90)
+mtext(paste("Two-sided permutation p-value =", round(p_perm, 5)),
+      side = 3, line = 0, cex = 0.8)
+dev.off()
+
+# --- Figure 10: best-subsets criteria (3 panels) ---
+pdf("figures/fig10_best_subsets.pdf", width = 10, height = 4)
+par(mfrow = c(1, 3))
+plot(mod1sum$bic, type = "b", pch = 19, col = "blue",
+     xlab = "# predictors", ylab = "BIC", main = "BIC by Model Size")
+points(n_bic, mod1sum$bic[n_bic], col = "red", pch = 19, cex = 1.5)
+plot(mod1sum$adjr2, type = "b", pch = 19, col = "blue",
+     xlab = "# predictors", ylab = expression("Adjusted "*R^2),
+     main = expression("Adjusted "*R^2*" by Model Size"))
+points(n_adjr2, mod1sum$adjr2[n_adjr2], col = "red", pch = 19, cex = 1.5)
+plot(mod1sum$cp, type = "b", pch = 19, col = "blue",
+     xlab = "# predictors", ylab = "Mallows' Cp",
+     main = "Cp by Model Size")
+points(n_cp, mod1sum$cp[n_cp], col = "red", pch = 19, cex = 1.5)
+par(mfrow = c(1, 1))
+dev.off()
+
+# --- Figure 11: bootstrapped interaction coefficient ---
+pdf("figures/fig11_bootstrap_interaction.pdf", width = fw, height = fh)
+ci_int <- quantile(boot_int, c(0.025, 0.975), na.rm = TRUE)
+hist(boot_int, col = "blue", breaks = 50,
+     main = "Bootstrapped Interaction Coefficient",
+     xlab = "constructor_dominance x teammate_parity")
+abline(v = ci_int, lwd = 3, col = "red")
+abline(v = confint(final_model, "constructor_dominance:teammate_parity"),
+       lwd = 3, col = "green", lty = 2)
+legend("topleft", c("Theoretical CI", "Boot CI"),
+       col = c("green", "red"), lty = c(2, 1), lwd = 3, bty = "n")
+dev.off()
+
+# --- Figure 12: predicted probability of qualifying underperformance ---
+pdf("figures/fig12_logit_predicted.pdf", width = fw, height = fh)
+plot(new_data$constructor_dominance[new_data$teammate_threat == 0],
+     new_data$predicted_prob[new_data$teammate_threat == 0],
+     type = "l", col = "blue", lwd = 3, ylim = c(0, 1),
+     xlab = "Constructor Dominance",
+     ylab = "P(Underperforms Qualifying Baseline)",
+     main = "Predicted Probability of Qualifying Underperformance (2010-2024 era)")
+lines(new_data$constructor_dominance[new_data$teammate_threat == 1],
+      new_data$predicted_prob[new_data$teammate_threat == 1],
+      col = "red", lwd = 3)
+legend("topright",
+       legend = c("No teammate threat", "Teammate threat"),
+       col = c("blue", "red"), lwd = 3, bty = "n")
+dev.off()
+
+message("All 12 figures saved to ./figures/")
+```
+```
+
+```{r}
+```{r economic-analysis-appendix, results='hold', warning=FALSE, message=FALSE, fig.show='hide'}
+# =========================================================================
+# ECONOMIC-MODELING APPENDIX — wide-net exploration (9 blocks, A-I).
+# Each block ports an established design from political science / labor econ
+# / sports econ to F1. Anchor citations in comments. No method is novel;
+# every block is recognizable to JQAS / J. Sports Econ. / J. Sports
+# Analytics referees.
+#
+# Outputs:
+#   - Console: banner + headline statistic per block
+#   - figures/fig13*-fig21*.pdf: candidate figures (narrow down post-render)
+# Dependencies (must already exist): table_a, table_b, table_b_model,
+#   driver_standings_final, results, qualifying, final_model
+# =========================================================================
+dir.create("figures", showWarnings = FALSE)
+fw <- 7; fh <- 5
+cat("\n=========== ECONOMIC-MODELING APPENDIX (9 BLOCKS) ===========\n")
+
+# -------------------------------------------------------------------------
+# BLOCK A — SPOILER-EFFECT COUNTERFACTUAL
+# Magee (2003) JoP; Burden (2005) Electoral Studies; Riker-Ordeshook.
+# Driver-2 = "spoiler"; reallocate their points to driver-1 and recompute
+# external WDC margin. Spoiler magnitude = analog of "votes lost to spoiler."
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK A: Spoiler counterfactual (Magee 2003, Burden 2005) ---\n")
+table_a$margin_no_spoiler     <- NA
+table_a$external_rival_points <- NA
+for (i in seq_len(nrow(table_a))) {
+  yr <- table_a$year[i]; team <- table_a$wcc_team_id[i]; total <- table_a$totalpoints[i]
+  ds <- driver_standings_final[driver_standings_final$year == yr, ]
+  driver_team <- tapply(results$constructorId[results$year == yr],
+                        results$driverId[results$year == yr],
+                        function(x) as.numeric(names(sort(table(x), decreasing = TRUE)))[1])
+  ds$primary_team <- driver_team[as.character(ds$driverId)]
+  ext <- ds[!is.na(ds$primary_team) & ds$primary_team != team, ]
+  ext <- ext[order(-ext$points), ]
+  rival <- if (nrow(ext) >= 1) ext$points[1] else NA
+  table_a$external_rival_points[i] <- rival
+  table_a$margin_no_spoiler[i] <- ((table_a$driver1_points[i] + table_a$driver2_points[i]) - rival) / total
+}
+table_a$spoiler_magnitude <- table_a$margin_no_spoiler - table_a$wdc_margin
+
+cat("Mean spoiler magnitude:",   round(mean(table_a$spoiler_magnitude,   na.rm = TRUE), 4), "\n")
+cat("Median spoiler magnitude:", round(median(table_a$spoiler_magnitude, na.rm = TRUE), 4), "\n")
+cat("Cor(spoiler magnitude, teammate_parity):",
+    round(cor(table_a$spoiler_magnitude, table_a$teammate_parity, use = "complete.obs"), 3), "\n")
+top10 <- table_a[order(-table_a$spoiler_magnitude), ][1:10, c("year", "spoiler_magnitude", "teammate_parity")]
+cat("Top 10 spoiler seasons:\n"); print(top10, row.names = FALSE)
+
+pdf("figures/fig13a_spoiler_distribution.pdf", width = fw, height = fh)
+hist(table_a$spoiler_magnitude, breaks = 20, col = "lightcoral",
+     main = "Distribution of Spoiler Magnitude Across WCC-Winning Seasons",
+     xlab = "Spoiler magnitude (no-spoiler margin minus realized, normalized)")
+abline(v = mean(table_a$spoiler_magnitude, na.rm = TRUE), col = "blue", lwd = 2, lty = 2)
+legend("topright", legend = "Mean", col = "blue", lty = 2, lwd = 2, bty = "n")
+dev.off()
+
+pdf("figures/fig13b_top_spoiler_seasons.pdf", width = fw, height = fh)
+par(mar = c(5, 5, 4, 2))
+barplot(rev(top10$spoiler_magnitude), names.arg = rev(top10$year), horiz = TRUE, las = 1,
+        col = "lightcoral", xlab = "Spoiler magnitude (normalized)",
+        main = "Top 10 Spoiler Seasons (WDC Margin Lost to Intra-Team Splitting)")
+dev.off()
+
+pdf("figures/fig13c_spoiler_vs_parity.pdf", width = fw, height = fh)
+plot(table_a$teammate_parity, table_a$spoiler_magnitude, pch = 19, col = "darkred",
+     xlab = "Teammate parity (normalized)", ylab = "Spoiler magnitude (normalized)",
+     main = "Spoiler Magnitude vs. Teammate Parity")
+abline(lm(spoiler_magnitude ~ teammate_parity, data = table_a), col = "blue", lwd = 2, lty = 2)
+mtext(paste("Correlation =",
+            round(cor(table_a$spoiler_magnitude, table_a$teammate_parity, use = "complete.obs"), 3)),
+      side = 3, cex = 1.0)
+dev.off()
+
+table_a$decade <- floor(table_a$year / 10) * 10
+pdf("figures/fig13d_spoiler_by_decade.pdf", width = fw, height = fh)
+boxplot(spoiler_magnitude ~ decade, data = table_a, col = "lightcoral",
+        xlab = "Decade", ylab = "Spoiler magnitude (normalized)",
+        main = "Spoiler Magnitude by Decade")
+dev.off()
+
+# -------------------------------------------------------------------------
+# BLOCK B — BANZHAF-STYLE PIVOTALITY (race-level decisiveness)
+# Banzhaf (1965); Penrose (1946); Felsenthal & Machover (1998); Gelman et al. (2002).
+# For each race, recompute the WDC if that race's points were zeroed for
+# each WCC driver. Driver is "pivotal" if removal flips the WDC champion.
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK B: Banzhaf pivotality (Banzhaf 1965, Penrose 1946) ---\n")
+table_a$d1_pivotality <- NA; table_a$d2_pivotality <- NA
+for (i in seq_len(nrow(table_a))) {
+  yr <- table_a$year[i]; d1 <- table_a$driver1_id[i]; d2 <- table_a$driver2_id[i]
+  res_yr <- results[results$year == yr, ]
+  ds_yr  <- driver_standings_final[driver_standings_final$year == yr, ]
+  totals <- aggregate(points ~ driverId, data = ds_yr, FUN = sum)
+  champ  <- totals$driverId[which.max(totals$points)]
+  d1_piv <- 0; d2_piv <- 0
+  for (rid in unique(res_yr$raceId)) {
+    rp  <- res_yr$points[res_yr$raceId == rid]
+    rd  <- res_yr$driverId[res_yr$raceId == rid]
+    d1r <- sum(rp[rd == d1], na.rm = TRUE); d2r <- sum(rp[rd == d2], na.rm = TRUE)
+    if (d1r > 0) {
+      m <- totals; m$points[m$driverId == d1] <- m$points[m$driverId == d1] - d1r
+      if (m$driverId[which.max(m$points)] != champ) d1_piv <- d1_piv + 1
+    }
+    if (d2r > 0) {
+      m <- totals; m$points[m$driverId == d2] <- m$points[m$driverId == d2] - d2r
+      if (m$driverId[which.max(m$points)] != champ) d2_piv <- d2_piv + 1
+    }
+  }
+  n_races <- length(unique(res_yr$raceId))
+  table_a$d1_pivotality[i] <- d1_piv / n_races
+  table_a$d2_pivotality[i] <- d2_piv / n_races
+}
+table_a$pivotality_diff  <- table_a$d1_pivotality - table_a$d2_pivotality
+table_a$pivotality_total <- table_a$d1_pivotality + table_a$d2_pivotality
+cat("Mean d1 pivotality:", round(mean(table_a$d1_pivotality, na.rm = TRUE), 3), "\n")
+cat("Mean d2 pivotality:", round(mean(table_a$d2_pivotality, na.rm = TRUE), 3), "\n")
+cat("Cor(|pivotality diff|, teammate_parity):",
+    round(cor(abs(table_a$pivotality_diff), table_a$teammate_parity, use = "complete.obs"), 3), "\n")
+
+pdf("figures/fig14a_pivotality_diff_vs_parity.pdf", width = fw, height = fh)
+plot(table_a$teammate_parity, abs(table_a$pivotality_diff), pch = 19, col = "purple",
+     xlab = "Teammate parity (normalized)",
+     ylab = "|d1 pivotality - d2 pivotality|",
+     main = "Within-Team Pivotality Asymmetry vs. Teammate Parity")
+abline(lm(abs(pivotality_diff) ~ teammate_parity, data = table_a), col = "blue", lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig14b_pivotality_timeseries.pdf", width = fw, height = fh)
+plot(table_a$year, table_a$pivotality_total, type = "o", pch = 19, col = "purple",
+     xlab = "Year", ylab = "Total within-team pivotality rate",
+     main = "Time Series of WCC-Team Race-Level Pivotality")
+dev.off()
+
+# -------------------------------------------------------------------------
+# BLOCK C — COOPERATIVE-GAME SHAPLEY DECOMPOSITION
+# Ginsburgh & Zang (2003); Hernández-Lamoneda & Sánchez-Sánchez (2010).
+# Non-additive v: v(S) = max external WDC margin attainable by S.
+# Closed-form Shapley for 2-player game. Synergy proxies wasted contribution.
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK C: Shapley value decomposition (Ginsburgh & Zang 2003) ---\n")
+table_a$v_d1   <- (table_a$driver1_points - table_a$external_rival_points) / table_a$totalpoints
+table_a$v_d2   <- (table_a$driver2_points - table_a$external_rival_points) / table_a$totalpoints
+table_a$v_team <- (pmax(table_a$driver1_points, table_a$driver2_points)
+                    - table_a$external_rival_points) / table_a$totalpoints
+table_a$synergy   <- table_a$v_team - table_a$v_d1 - table_a$v_d2
+table_a$shapley_d1 <- 0.5 * (table_a$v_d1 + table_a$v_team - table_a$v_d2)
+table_a$shapley_d2 <- 0.5 * (table_a$v_d2 + table_a$v_team - table_a$v_d1)
+table_a$shapley_imbalance <- abs(table_a$shapley_d1 - table_a$shapley_d2) /
+                              (abs(table_a$shapley_d1) + abs(table_a$shapley_d2) + 1e-9)
+cat("Mean synergy:", round(mean(table_a$synergy, na.rm = TRUE), 4), "\n")
+cat("Cor(synergy, teammate_parity):",
+    round(cor(table_a$synergy, table_a$teammate_parity, use = "complete.obs"), 3), "\n")
+cat("Cor(shapley_imbalance, wdc_margin):",
+    round(cor(table_a$shapley_imbalance, table_a$wdc_margin, use = "complete.obs"), 3), "\n")
+
+pdf("figures/fig15a_shapley_synergy_vs_parity.pdf", width = fw, height = fh)
+col_fail <- ifelse(table_a$translation_failed == "Failed", "red", "blue")
+plot(table_a$teammate_parity, table_a$synergy, pch = 19, col = col_fail,
+     xlab = "Teammate parity (normalized)", ylab = "Shapley synergy",
+     main = "Shapley Synergy vs. Teammate Parity (red = translation failed)")
+abline(lm(synergy ~ teammate_parity, data = table_a), col = "darkgreen", lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig15b_shapley_imbalance_vs_margin.pdf", width = fw, height = fh)
+plot(table_a$shapley_imbalance, table_a$wdc_margin, pch = 19, col = "darkblue",
+     xlab = "Shapley imbalance (asymmetry of within-team contributions)",
+     ylab = "WDC margin (normalized)",
+     main = "Shapley Imbalance vs. WDC Margin")
+abline(lm(wdc_margin ~ shapley_imbalance, data = table_a), col = "red", lwd = 2, lty = 2)
+dev.off()
+
+# -------------------------------------------------------------------------
+# BLOCK D — PRODUCTIVITY-SPILLOVER PANEL (Two-way FE)
+# Arcidiacono, Kinsler & Price (2017) JOLE: NBA productivity spillovers.
+# Identifies teammate-ability spillover off within-driver variation in mate.
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK D: Two-way FE spillover (AKP 2017 J. Labor Econ.) ---\n")
+mate_lookup <- table_b[, c("driverId", "year", "driver_baseline_quali")]
+names(mate_lookup) <- c("teammate_id", "year", "mate_baseline_quali")
+panel_d <- merge(table_b_model, mate_lookup, by = c("teammate_id", "year"), all.x = TRUE)
+panel_d <- panel_d[!is.na(panel_d$mate_baseline_quali), ]
+cat("Panel D: n =", nrow(panel_d), "driver-seasons; drivers =", length(unique(panel_d$driverId)),
+    "; years =", length(unique(panel_d$year)), "\n")
+
+spec1 <- lm(quali_gap_to_pole ~ mate_baseline_quali + constructor_dominance, data = panel_d)
+spec2 <- lm(quali_gap_to_pole ~ mate_baseline_quali + constructor_dominance + factor(driverId),
+            data = panel_d)
+spec3 <- lm(quali_gap_to_pole ~ mate_baseline_quali + constructor_dominance +
+              factor(driverId) + factor(year), data = panel_d)
+spec4 <- lm(quali_gap_to_pole ~ mate_baseline_quali * constructor_dominance +
+              factor(driverId) + factor(year), data = panel_d)
+
+extract_ci <- function(mod, var) {
+  e <- coef(mod)[var]; ci <- confint(mod, var)
+  c(est = unname(e), lower = ci[1], upper = ci[2])
+}
+spec_tbl <- rbind(extract_ci(spec1, "mate_baseline_quali"),
+                  extract_ci(spec2, "mate_baseline_quali"),
+                  extract_ci(spec3, "mate_baseline_quali"),
+                  extract_ci(spec4, "mate_baseline_quali"))
+spec_tbl <- as.data.frame(spec_tbl); spec_tbl$spec <- 1:4
+cat("Coefficient on mate_baseline_quali across nested specs:\n"); print(round(spec_tbl, 4))
+
+pdf("figures/fig16_panel_coefs.pdf", width = fw, height = fh)
+plot(spec_tbl$spec, spec_tbl$est, pch = 19, col = "darkorange",
+     ylim = range(c(spec_tbl$lower, spec_tbl$upper, 0)),
+     xaxt = "n", xlab = "Specification",
+     ylab = "Coefficient on Teammate Baseline Quali Gap",
+     main = "Teammate-Ability Spillover Across FE Specifications")
+axis(1, at = 1:4, labels = c("No FE", "Driver FE", "+Year FE", "+Interaction"))
+arrows(spec_tbl$spec, spec_tbl$lower, spec_tbl$spec, spec_tbl$upper,
+       angle = 90, code = 3, length = 0.05, col = "darkorange")
+abline(h = 0, lty = 2, col = "gray50")
+dev.off()
+
+# -------------------------------------------------------------------------
+# BLOCK E — BERRI-SCHMIDT USAGE / DIMINISHING RETURNS
+# Berri & Schmidt (2010) Stumbling on Wins; Berri (2008) Win Score.
+# Within each WCC team, regress lead-driver normalized output on own and
+# teammate "usage" share of top-3 finishes.
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK E: Diminishing returns to teammate usage (Berri-Schmidt 2010) ---\n")
+table_a$d1_usage <- NA; table_a$d2_usage <- NA
+for (i in seq_len(nrow(table_a))) {
+  yr <- table_a$year[i]; team <- table_a$wcc_team_id[i]
+  team_res <- results[results$year == yr & results$constructorId == team, ]
+  if (nrow(team_res) == 0) next
+  d1 <- table_a$driver1_id[i]; d2 <- table_a$driver2_id[i]
+  n <- nrow(team_res)
+  table_a$d1_usage[i] <- sum(team_res$driverId == d1 & team_res$position <= 3, na.rm = TRUE) / n
+  table_a$d2_usage[i] <- sum(team_res$driverId == d2 & team_res$position <= 3, na.rm = TRUE) / n
+}
+table_a$d1_norm_points <- table_a$driver1_points / table_a$totalpoints
+mod_e <- lm(d1_norm_points ~ d1_usage + d2_usage + constructor_dominance, data = table_a)
+cat("Coef on d2_usage (diminishing returns): ",
+    round(coef(mod_e)["d2_usage"], 3),
+    " (p = ", round(summary(mod_e)$coefficients["d2_usage", 4], 4), ")\n", sep = "")
+print(round(summary(mod_e)$coefficients, 4))
+
+pdf("figures/fig17_usage_diminishing_returns.pdf", width = fw, height = fh)
+mod_e_partial <- lm(d1_norm_points ~ d1_usage + constructor_dominance,
+                    data = table_a[!is.na(table_a$d1_usage) & !is.na(table_a$d2_usage), ])
+sub <- table_a[!is.na(table_a$d1_usage) & !is.na(table_a$d2_usage), ]
+plot(sub$d2_usage, residuals(mod_e_partial), pch = 19, col = "darkgreen",
+     xlab = "Teammate usage (share of team's top-3 finishes)",
+     ylab = "Residual: lead-driver normalized points",
+     main = "Diminishing Returns: Lead-Driver Output vs. Teammate Usage")
+abline(h = 0, lty = 2, col = "gray50")
+abline(lm(residuals(mod_e_partial) ~ sub$d2_usage), col = "red", lwd = 2, lty = 2)
+dev.off()
+
+# -------------------------------------------------------------------------
+# BLOCK F — RANK-ORDER TOURNAMENT THEORY
+# Lazear & Rosen (1981) JPE; Lazear (1989) sabotage; Ehrenberg & Bognanno (1990) PGA.
+# Test whether title competitiveness systematically shifts within-team parity.
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK F: Rank-order tournament (Lazear-Rosen 1981) ---\n")
+table_a$wdc_p1_minus_p2 <- (table_a$wdc_p1_points - table_a$wdc_p2_points) / table_a$totalpoints
+table_a$competitive <- ifelse(table_a$wdc_p1_minus_p2 < median(table_a$wdc_p1_minus_p2, na.rm = TRUE),
+                              "Competitive", "Blowout")
+t_f <- t.test(teammate_parity ~ competitive, data = table_a); print(t_f)
+
+pdf("figures/fig18a_tournament_competitive.pdf", width = fw, height = fh)
+boxplot(teammate_parity ~ competitive, data = table_a, col = c("lightblue", "salmon"),
+        ylab = "Teammate parity (normalized)",
+        xlab = "Title competitiveness (median split on WDC P1-P2 margin)",
+        main = "Teammate Parity by Title Competitiveness")
+dev.off()
+
+pdf("figures/fig18b_tournament_spread_scatter.pdf", width = fw, height = fh)
+plot(table_a$wdc_p1_minus_p2, table_a$teammate_parity, pch = 19, col = "darkorange",
+     xlab = "Title spread (smaller = more competitive)",
+     ylab = "Teammate parity (normalized)",
+     main = "Tournament Prize Spread vs. Within-Team Parity")
+abline(lm(teammate_parity ~ wdc_p1_minus_p2, data = table_a), col = "blue", lwd = 2, lty = 2)
+dev.off()
+
+# -------------------------------------------------------------------------
+# BLOCK G — QUANTILE REGRESSION
+# Koenker & Bassett (1978); Bryson, Frick & Simmons (2013).
+# Test whether parity-suppression mechanism is heterogeneous across the
+# WDC-margin distribution.
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK G: Quantile regression (Koenker & Bassett 1978) ---\n")
+if (requireNamespace("quantreg", quietly = TRUE)) {
+  library(quantreg)
+  taus <- c(0.10, 0.25, 0.5, 0.75, 0.90)
+  qr_list <- lapply(taus, function(t) rq(wdc_margin ~ constructor_dominance * teammate_parity,
+                                          data = table_a, tau = t))
+  inter <- sapply(qr_list, function(m) coef(m)["constructor_dominance:teammate_parity"])
+  inter_se <- sapply(qr_list, function(m) {
+    s <- summary(m, se = "boot", R = 500, covariance = TRUE)
+    s$coefficients["constructor_dominance:teammate_parity", 2]
+  })
+  cat("Interaction coefficient by tau:\n")
+  print(round(setNames(inter, taus), 3))
+  ols_inter <- coef(final_model)["constructor_dominance:teammate_parity"]
+  pdf("figures/fig19_quantile_interaction.pdf", width = fw, height = fh)
+  plot(taus, inter, pch = 19, col = "darkviolet", type = "b",
+       ylim = range(c(inter - 2*inter_se, inter + 2*inter_se, ols_inter)),
+       xlab = expression(tau), ylab = "Coefficient on D x T",
+       main = "Quantile Regression: Interaction Coefficient Across Quantiles")
+  arrows(taus, inter - 1.96*inter_se, taus, inter + 1.96*inter_se,
+         angle = 90, code = 3, length = 0.05, col = "darkviolet")
+  abline(h = ols_inter, col = "red", lwd = 2, lty = 2)
+  legend("topleft", c("Quantile (95% CI)", "OLS"),
+         col = c("darkviolet", "red"), pch = c(19, NA), lty = c(NA, 2), lwd = 2, bty = "n")
+  dev.off()
+} else cat("Skipping G: install.packages('quantreg') required.\n")
+
+# -------------------------------------------------------------------------
+# BLOCK H — EVENT STUDY AROUND REGULATION SHOCKS
+# Card & Krueger (1994); Bertrand-Duflo-Mullainathan (2004); Price-Wolfers (2010).
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK H: Event study around regulation shocks ---\n")
+shocks <- c(1980, 1995, 2010, 2014, 2022)
+shock_lbls <- c("1980 GE ban", "1995 V10", "2010 refuel ban", "2014 turbo-hybrid", "2022 GE return")
+yr_parity <- aggregate(teammate_parity ~ year, data = table_a, FUN = mean)
+
+pdf("figures/fig20_regulation_timeseries.pdf", width = fw, height = fh)
+plot(yr_parity$year, yr_parity$teammate_parity, type = "o", pch = 19, col = "navy",
+     xlab = "Year", ylab = "Annual mean teammate parity",
+     main = "Teammate Parity Time Series with Regulation Shocks")
+abline(v = shocks, col = "red", lty = 2)
+text(shocks, par("usr")[4], shock_lbls, srt = 90, adj = c(1.1, -0.2), cex = 0.65, col = "red")
+dev.off()
+
+window <- 5
+pre  <- table_a$teammate_parity[table_a$year %in% (2014 - window):2013]
+post <- table_a$teammate_parity[table_a$year %in% 2014:(2014 + window - 1)]
+if (length(pre) >= 2 && length(post) >= 2) {
+  did_t <- t.test(post, pre)
+  cat("DiD around 2014 hybrid shock: pre =", round(mean(pre), 3),
+      "; post =", round(mean(post), 3),
+      "; Welch p =", round(did_t$p.value, 4), "\n")
+}
+
+# -------------------------------------------------------------------------
+# BLOCK I — SYNTHETIC CONTROL FOR THE 2016 ROSBERG SEASON
+# Abadie & Gardeazabal (2003); Abadie, Diamond & Hainmueller (2010) JASA.
+# Match 2016 Mercedes (the actual motivating case) to a synthetic control
+# from high-parity dominant-constructor donor seasons.
+# -------------------------------------------------------------------------
+cat("\n--- BLOCK I: Synthetic control for 2016 (Abadie et al. 2010) ---\n")
+treated_idx <- which(table_a$year == 2016)
+if (length(treated_idx) == 1) {
+  treated <- table_a[treated_idx, ]
+  donors  <- table_a[table_a$year != 2016 &
+                     table_a$teammate_parity > median(table_a$teammate_parity, na.rm = TRUE), ]
+  d <- abs(donors$constructor_dominance - treated$constructor_dominance)
+  w <- 1 / (d + 0.001); w <- w / sum(w)
+  synth <- sum(w * donors$wdc_margin)
+  cat("Realized 2016 wdc_margin: ", round(treated$wdc_margin, 3), "\n",
+      "Synthetic 2016 wdc_margin: ", round(synth, 3), "\n",
+      "Treatment effect (realized - synthetic): ", round(treated$wdc_margin - synth, 3), "\n", sep = "")
+  ord <- order(-w)[1:5]
+  cat("Top 5 donor seasons:\n")
+  print(data.frame(year = donors$year[ord], weight = round(w[ord], 3),
+                   wdc_margin = round(donors$wdc_margin[ord], 3)), row.names = FALSE)
+
+  pdf("figures/fig21_synthetic_control_2016.pdf", width = fw, height = fh)
+  yr_means <- aggregate(wdc_margin ~ year, data = table_a, FUN = mean)
+  plot(yr_means$year, yr_means$wdc_margin, type = "o", pch = 19, col = "gray60",
+       xlab = "Year", ylab = "WDC margin (normalized)",
+       main = "Realized vs. Synthetic Counterfactual for 2016 Mercedes")
+  points(2016, treated$wdc_margin, pch = 19, col = "red", cex = 2)
+  points(2016, synth, pch = 19, col = "blue", cex = 2)
+  legend("topright", c("Annual mean", "2016 realized", "2016 synthetic"),
+         col = c("gray60", "red", "blue"), pch = 19, bty = "n")
+  dev.off()
+}
+
+cat("\n=========== APPENDIX COMPLETE — figures/fig13*-fig21*.pdf ===========\n")
+```
+
+```{r}
+# Append after Block I
+placebo_gaps <- numeric(0)
+for (yr_test in donors$year) {
+  treated_p <- table_a[table_a$year == yr_test, ]
+  donors_p  <- table_a[table_a$year != yr_test &
+                       table_a$teammate_parity > median(table_a$teammate_parity, na.rm = TRUE), ]
+  if (nrow(donors_p) < 10) next
+  d <- abs(donors_p$constructor_dominance - treated_p$constructor_dominance)
+  w <- 1/(d + 0.001); w <- w/sum(w)
+  placebo_gaps <- c(placebo_gaps, treated_p$wdc_margin - sum(w * donors_p$wdc_margin))
+}
+gap_2016 <- treated$wdc_margin - synth
+cat("2016 gap percentile in placebo distribution:",
+    round(mean(placebo_gaps <= gap_2016), 3), "\n")
+pdf("figures/fig21b_synthetic_placebo.pdf", width = 7, height = 5)
+hist(placebo_gaps, breaks = 30, col = "lightgray",
+     main = "Placebo Distribution of Synthetic-Control Gaps (66 seasons)",
+     xlab = "Realized − synthetic WDC margin")
+abline(v = gap_2016, col = "red", lwd = 3)
+legend("topright", "2016 Mercedes", col = "red", lwd = 3, bty = "n")
+dev.off()
+
+# Append after Block G (requires quantreg already loaded)
+kx <- KhmaladzeTest(wdc_margin ~ constructor_dominance * teammate_parity,
+                    data = table_a, taus = seq(0.1, 0.9, by = 0.05),
+                    nullH = "location-scale")
+print(kx)   # If reject, the τ-decline in interaction is statistically real
+```
+
+
+```{r final-publication-figures, results='hold', fig.show='hide', warning=FALSE, message=FALSE}
+# =========================================================================
+# FINAL PUBLICATION FIGURES — 11 panels assembled into 6 LaTeX figures
+# via subcaption. Journal aesthetics: muted palette, L-shape axes,
+# no in-figure titles (caption text lives in LaTeX).
+# =========================================================================
+dir.create("figures", showWarnings = FALSE)
+
+pal <- c(navy = "#1f3a5f", coral = "#c14e4e", olive = "#7e8a3e",
+         gray = "#7a7a7a", gold = "#d4a017", teal = "#2e7d7d",
+         lightgray = "#d8d8d8")
+par(family = "sans", cex.lab = 0.95, cex.axis = 0.85,
+    mar = mar, mgp = c(2.4, 0.7, 0), tcl = -0.3,
+    bty = "l", col.axis = "gray30", col.lab = "gray20", fg = "gray40")
+
+# ---- Laakso-Taagepera effective number of contenders ----
+team_pts <- table_a$driver1_points + table_a$driver2_points
+team_pts[team_pts == 0] <- NA
+p1 <- table_a$driver1_points / team_pts
+p2 <- table_a$driver2_points / team_pts
+table_a$enc <- 1 / (p1^2 + p2^2)
+cat("--- Laakso-Taagepera (1979) effective number of contenders ---\n")
+cat("  Mean ENC:", round(mean(table_a$enc, na.rm = TRUE), 3), "\n")
+cat("  Cor(ENC, wdc_margin):     ",
+    round(cor(table_a$enc, table_a$wdc_margin, use = "complete.obs"), 3), "\n")
+cat("  Cor(ENC, teammate_parity):",
+    round(cor(table_a$enc, table_a$teammate_parity, use = "complete.obs"), 3), "\n\n")
+
+SW <- 4.2; SH <- 3.4
+FW <- 6.5; FH <- 4.5
+
+# ============ FIGURE 1 — Empirical setup (2x2) ============
+pdf("figures/fig1a_cd_vs_wdc.pdf", width = SW, height = SH); par_journal()
+plot(table_a$constructor_dominance, table_a$wdc_margin, pch = 19,
+     col = pal["navy"], cex = 0.85,
+     xlab = "Constructor dominance", ylab = "External WDC margin")
+abline(lm(wdc_margin ~ constructor_dominance, data = table_a),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig1b_parity_hist.pdf", width = SW, height = SH); par_journal()
+hist(table_a$teammate_parity, breaks = 15, col = pal["lightgray"],
+     border = "gray50", xlab = "Teammate parity", ylab = "Frequency", main = "")
+abline(v = median(table_a$teammate_parity, na.rm = TRUE),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig1c_resid_vs_parity.pdf", width = SW, height = SH); par_journal()
+plot(table_a$teammate_parity, table_a$resid_simple, pch = 19,
+     col = pal["navy"], cex = 0.85,
+     xlab = "Teammate parity",
+     ylab = "Residual: realized - predicted WDC margin")
+abline(h = 0, col = "gray60", lty = 3)
+abline(lm(resid_simple ~ teammate_parity, data = table_a),
+       col = pal["coral"], lwd = 2)
+dev.off()
+
+pdf("figures/fig1d_box_translation.pdf", width = SW, height = SH); par_journal()
+boxplot(teammate_parity ~ translation_failed, data = table_a,
+        col = c(pal["coral"], pal["navy"]), border = "gray30",
+        names = c("Failed", "Succeeded"), ylab = "Teammate parity", xlab = "")
+dev.off()
+
+# ============ FIGURE 2 — Bootstrap of interaction ============
+pdf("figures/fig2_bootstrap_interaction.pdf", width = FW, height = FH); par_journal()
+ci_int <- quantile(boot_int, c(0.025, 0.975), na.rm = TRUE)
+hist(boot_int, breaks = 50, col = pal["lightgray"], border = "gray50",
+     xlab = expression(hat(beta)[3]*": coefficient on "*D %*% T),
+     ylab = "Frequency", main = "")
+abline(v = ci_int, col = pal["coral"], lwd = 2)
+abline(v = confint(final_model, "constructor_dominance:teammate_parity"),
+       col = pal["navy"], lwd = 2, lty = 2)
+legend("topleft", c("Bootstrap 95% CI", "Parametric 95% CI"),
+       col = c(pal["coral"], pal["navy"]), lty = c(1, 2), lwd = 2,
+       bty = "n", cex = 0.85)
+dev.off()
+
+# ============ FIGURE 3 — Spoiler-effect (1x2) ============
+pdf("figures/fig3a_top_spoiler.pdf", width = SW + 0.5, height = SH + 0.3)
+par_journal(mar = c(4.2, 4.5, 1.0, 1.0))
+top10 <- table_a[order(-table_a$spoiler_magnitude), ][1:10, ]
+barplot(rev(top10$spoiler_magnitude), names.arg = rev(top10$year),
+        horiz = TRUE, las = 1, col = pal["coral"], border = "gray30",
+        xlab = "Spoiler magnitude (normalized)", cex.names = 0.85)
+dev.off()
+
+pdf("figures/fig3b_spoiler_vs_parity.pdf", width = SW + 0.5, height = SH + 0.3)
+par_journal()
+plot(table_a$teammate_parity, table_a$spoiler_magnitude,
+     pch = 19, col = pal["navy"], cex = 0.85,
+     xlab = "Teammate parity", ylab = "Spoiler magnitude")
+abline(lm(spoiler_magnitude ~ teammate_parity, data = table_a),
+       col = pal["coral"], lwd = 2, lty = 2)
+hl <- c(1988, 2016, 2002)
+hi <- table_a[table_a$year %in% hl, ]
+points(hi$teammate_parity, hi$spoiler_magnitude, pch = 21,
+       bg = pal["gold"], col = pal["coral"], cex = 1.6, lwd = 1.5)
+text(hi$teammate_parity, hi$spoiler_magnitude, labels = hi$year,
+     pos = 4, cex = 0.8, col = pal["coral"])
+dev.off()
+
+# ============ FIGURE 4 — Quantile interaction ============
+pdf("figures/fig4_quantile.pdf", width = FW, height = FH); par_journal()
+inter    <- sapply(qr_list, function(m) coef(m)["constructor_dominance:teammate_parity"])
+inter_se <- sapply(qr_list, function(m) {
+  s <- summary(m, se = "boot", R = 500, covariance = TRUE)
+  s$coefficients["constructor_dominance:teammate_parity", 2]
+})
+ols_inter <- coef(final_model)["constructor_dominance:teammate_parity"]
+plot(taus, inter, type = "b", pch = 19, col = pal["navy"], cex = 1.2,
+     ylim = range(c(inter - 2*inter_se, inter + 2*inter_se, ols_inter, 0)),
+     xlab = expression(tau~"(quantile of WDC margin)"),
+     ylab = expression(hat(beta)[3]*" (D x T)"))
+arrows(taus, inter - 1.96*inter_se, taus, inter + 1.96*inter_se,
+       angle = 90, code = 3, length = 0.05, col = pal["navy"])
+abline(h = ols_inter, col = pal["coral"], lwd = 2, lty = 2)
+abline(h = 0, col = "gray70", lty = 3)
+legend("topright", c("Quantile (95% CI)", "OLS estimate"),
+       col = c(pal["navy"], pal["coral"]), pch = c(19, NA), lty = c(NA, 2),
+       lwd = 2, bty = "n", cex = 0.9)
+dev.off()
+
+# ============ FIGURE 5 — Diminishing returns ============
+pdf("figures/fig5_diminishing_returns.pdf", width = FW, height = FH); par_journal()
+sub <- table_a[!is.na(table_a$d1_usage) & !is.na(table_a$d2_usage), ]
+mod_e_partial <- lm(d1_norm_points ~ d1_usage + constructor_dominance, data = sub)
+plot(sub$d2_usage, residuals(mod_e_partial),
+     pch = 19, col = pal["navy"], cex = 0.85,
+     xlab = "Teammate usage (share of team's top-3 finishes)",
+     ylab = "Residualized lead-driver normalized points")
+abline(h = 0, col = "gray60", lty = 3)
+abline(lm(residuals(mod_e_partial) ~ sub$d2_usage),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+# ============ FIGURE 6 — Behavioral channel rejected (1x2) ============
+pdf("figures/fig6a_panel_fe.pdf", width = SW + 0.5, height = SH + 0.3); par_journal()
+plot(spec_tbl$spec, spec_tbl$est, pch = 19, col = pal["navy"], cex = 1.2,
+     ylim = range(c(spec_tbl$lower, spec_tbl$upper, 0)),
+     xaxt = "n", xlab = "Specification",
+     ylab = expression(hat(beta)[1]*": teammate quali baseline"))
+axis(1, at = 1:4, labels = c("OLS", "+Driver", "+Year", "+Inter."), cex.axis = 0.85)
+arrows(spec_tbl$spec, spec_tbl$lower, spec_tbl$spec, spec_tbl$upper,
+       angle = 90, code = 3, length = 0.05, col = pal["navy"])
+abline(h = 0, lty = 3, col = "gray60")
+dev.off()
+
+pdf("figures/fig6b_logit_predicted.pdf", width = SW + 0.5, height = SH + 0.3); par_journal()
+plot(new_data$constructor_dominance[new_data$teammate_threat == 0],
+     new_data$predicted_prob[new_data$teammate_threat == 0],
+     type = "l", col = pal["navy"], lwd = 2.5, ylim = c(0, 1),
+     xlab = "Constructor dominance",
+     ylab = "P(qualifying underperformance)")
+lines(new_data$constructor_dominance[new_data$teammate_threat == 1],
+      new_data$predicted_prob[new_data$teammate_threat == 1],
+      col = pal["coral"], lwd = 2.5)
+legend("topright", c("No teammate threat", "Teammate threat"),
+       col = c(pal["navy"], pal["coral"]), lwd = 2.5, bty = "n", cex = 0.85)
+dev.off()
+
+cat("All 11 publication panels written to figures/.\n")
+```
+```{r final-publication-figures, results='hold', fig.show='hide', warning=FALSE, message=FALSE}
+# =========================================================================
+# FINAL PUBLICATION FIGURES — 11 panels assembled into 6 LaTeX figures
+# via subcaption. Journal aesthetics: muted palette, L-shape axes,
+# no in-figure titles (caption text lives in LaTeX).
+# =========================================================================
+dir.create("figures", showWarnings = FALSE)
+
+pal <- c(navy = "#1f3a5f", coral = "#c14e4e", olive = "#7e8a3e",
+         gray = "#7a7a7a", gold = "#d4a017", teal = "#2e7d7d",
+         lightgray = "#d8d8d8")
+par_journal <- function(mar = c(4.2, 4.2, 1.0, 1.0)) {
+  par(family = "sans", cex.lab = 0.95, cex.axis = 0.85, cex.main = 0,
+      mar = mar, mgp = c(2.4, 0.7, 0), tcl = -0.3,
+      bty = "l", col.axis = "gray30", col.lab = "gray20", fg = "gray40")
+}
+
+# ---- Laakso-Taagepera effective number of contenders ----
+team_pts <- table_a$driver1_points + table_a$driver2_points
+team_pts[team_pts == 0] <- NA
+p1 <- table_a$driver1_points / team_pts
+p2 <- table_a$driver2_points / team_pts
+table_a$enc <- 1 / (p1^2 + p2^2)
+cat("--- Laakso-Taagepera (1979) effective number of contenders ---\n")
+cat("  Mean ENC:", round(mean(table_a$enc, na.rm = TRUE), 3), "\n")
+cat("  Cor(ENC, wdc_margin):     ",
+    round(cor(table_a$enc, table_a$wdc_margin, use = "complete.obs"), 3), "\n")
+cat("  Cor(ENC, teammate_parity):",
+    round(cor(table_a$enc, table_a$teammate_parity, use = "complete.obs"), 3), "\n\n")
+
+SW <- 4.2; SH <- 3.4
+FW <- 6.5; FH <- 4.5
+
+# ============ FIGURE 1 — Empirical setup (2x2) ============
+# Inline par settings (no helper function needed)
+.par_set <- function() par(family = "sans", cex.lab = 0.95, cex.axis = 0.85,
+                           mar = c(4.2, 4.2, 1.0, 1.0), mgp = c(2.4, 0.7, 0),
+                           tcl = -0.3, bty = "l",
+                           col.axis = "gray30", col.lab = "gray20",
+                           fg = "gray40")
+
+# === FIGURE 1 ===
+pdf("figures/fig1a_cd_vs_wdc.pdf", width = SW, height = SH)
+.par_set()
+plot(table_a$constructor_dominance, table_a$wdc_margin, pch = 19,
+     col = pal["navy"], cex = 0.85,
+     xlab = "Constructor dominance", ylab = "External WDC margin")
+abline(lm(wdc_margin ~ constructor_dominance, data = table_a),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig1b_parity_hist.pdf", width = SW, height = SH)
+.par_set()
+hist(table_a$teammate_parity, breaks = 15, col = pal["lightgray"],
+     border = "gray50", xlab = "Teammate parity", ylab = "Frequency", main = "")
+abline(v = median(table_a$teammate_parity, na.rm = TRUE),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig1c_resid_vs_parity.pdf", width = SW, height = SH)
+.par_set()
+plot(table_a$teammate_parity, table_a$resid_simple, pch = 19,
+     col = pal["navy"], cex = 0.85,
+     xlab = "Teammate parity",
+     ylab = "Residual: realized - predicted WDC margin")
+abline(h = 0, col = "gray60", lty = 3)
+abline(lm(resid_simple ~ teammate_parity, data = table_a),
+       col = pal["coral"], lwd = 2)
+dev.off()
+
+pdf("figures/fig1d_box_translation.pdf", width = SW, height = SH)
+.par_set()
+boxplot(teammate_parity ~ translation_failed, data = table_a,
+        col = c(pal["coral"], pal["navy"]), border = "gray30",
+        names = c("Failed", "Succeeded"), ylab = "Teammate parity", xlab = "")
+dev.off()
+
+# ============ FIGURE 2 — Bootstrap of interaction ============
+pdf("figures/fig2_bootstrap_interaction.pdf", width = FW, height = FH); par_journal()
+ci_int <- quantile(boot_int, c(0.025, 0.975), na.rm = TRUE)
+hist(boot_int, breaks = 50, col = pal["lightgray"], border = "gray50",
+     xlab = expression(hat(beta)[3]*": coefficient on "*D %*% T),
+     ylab = "Frequency", main = "")
+abline(v = ci_int, col = pal["coral"], lwd = 2)
+abline(v = confint(final_model, "constructor_dominance:teammate_parity"),
+       col = pal["navy"], lwd = 2, lty = 2)
+legend("topleft", c("Bootstrap 95% CI", "Parametric 95% CI"),
+       col = c(pal["coral"], pal["navy"]), lty = c(1, 2), lwd = 2,
+       bty = "n", cex = 0.85)
+dev.off()
+
+# ============ FIGURE 3 — Spoiler-effect (1x2) ============
+pdf("figures/fig3a_top_spoiler.pdf", width = SW + 0.5, height = SH + 0.3)
+par_journal(mar = c(4.2, 4.5, 1.0, 1.0))
+top10 <- table_a[order(-table_a$spoiler_magnitude), ][1:10, ]
+barplot(rev(top10$spoiler_magnitude), names.arg = rev(top10$year),
+        horiz = TRUE, las = 1, col = pal["coral"], border = "gray30",
+        xlab = "Spoiler magnitude (normalized)", cex.names = 0.85)
+dev.off()
+
+pdf("figures/fig3b_spoiler_vs_parity.pdf", width = SW + 0.5, height = SH + 0.3)
+par_journal()
+plot(table_a$teammate_parity, table_a$spoiler_magnitude,
+     pch = 19, col = pal["navy"], cex = 0.85,
+     xlab = "Teammate parity", ylab = "Spoiler magnitude")
+abline(lm(spoiler_magnitude ~ teammate_parity, data = table_a),
+       col = pal["coral"], lwd = 2, lty = 2)
+hl <- c(1988, 2016, 2002)
+hi <- table_a[table_a$year %in% hl, ]
+points(hi$teammate_parity, hi$spoiler_magnitude, pch = 21,
+       bg = pal["gold"], col = pal["coral"], cex = 1.6, lwd = 1.5)
+text(hi$teammate_parity, hi$spoiler_magnitude, labels = hi$year,
+     pos = 4, cex = 0.8, col = pal["coral"])
+dev.off()
+
+# ============ FIGURE 4 — Quantile interaction ============
+pdf("figures/fig4_quantile.pdf", width = FW, height = FH); par_journal()
+inter    <- sapply(qr_list, function(m) coef(m)["constructor_dominance:teammate_parity"])
+inter_se <- sapply(qr_list, function(m) {
+  s <- summary(m, se = "boot", R = 500, covariance = TRUE)
+  s$coefficients["constructor_dominance:teammate_parity", 2]
+})
+ols_inter <- coef(final_model)["constructor_dominance:teammate_parity"]
+plot(taus, inter, type = "b", pch = 19, col = pal["navy"], cex = 1.2,
+     ylim = range(c(inter - 2*inter_se, inter + 2*inter_se, ols_inter, 0)),
+     xlab = expression(tau~"(quantile of WDC margin)"),
+     ylab = expression(hat(beta)[3]*" (D x T)"))
+arrows(taus, inter - 1.96*inter_se, taus, inter + 1.96*inter_se,
+       angle = 90, code = 3, length = 0.05, col = pal["navy"])
+abline(h = ols_inter, col = pal["coral"], lwd = 2, lty = 2)
+abline(h = 0, col = "gray70", lty = 3)
+legend("topright", c("Quantile (95% CI)", "OLS estimate"),
+       col = c(pal["navy"], pal["coral"]), pch = c(19, NA), lty = c(NA, 2),
+       lwd = 2, bty = "n", cex = 0.9)
+dev.off()
+
+# ============ FIGURE 5 — Diminishing returns ============
+pdf("figures/fig5_diminishing_returns.pdf", width = FW, height = FH); par_journal()
+sub <- table_a[!is.na(table_a$d1_usage) & !is.na(table_a$d2_usage), ]
+mod_e_partial <- lm(d1_norm_points ~ d1_usage + constructor_dominance, data = sub)
+plot(sub$d2_usage, residuals(mod_e_partial),
+     pch = 19, col = pal["navy"], cex = 0.85,
+     xlab = "Teammate usage (share of team's top-3 finishes)",
+     ylab = "Residualized lead-driver normalized points")
+abline(h = 0, col = "gray60", lty = 3)
+abline(lm(residuals(mod_e_partial) ~ sub$d2_usage),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+# ============ FIGURE 6 — Behavioral channel rejected (1x2) ============
+pdf("figures/fig6a_panel_fe.pdf", width = SW + 0.5, height = SH + 0.3); par_journal()
+plot(spec_tbl$spec, spec_tbl$est, pch = 19, col = pal["navy"], cex = 1.2,
+     ylim = range(c(spec_tbl$lower, spec_tbl$upper, 0)),
+     xaxt = "n", xlab = "Specification",
+     ylab = expression(hat(beta)[1]*": teammate quali baseline"))
+axis(1, at = 1:4, labels = c("OLS", "+Driver", "+Year", "+Inter."), cex.axis = 0.85)
+arrows(spec_tbl$spec, spec_tbl$lower, spec_tbl$spec, spec_tbl$upper,
+       angle = 90, code = 3, length = 0.05, col = pal["navy"])
+abline(h = 0, lty = 3, col = "gray60")
+dev.off()
+
+pdf("figures/fig6b_logit_predicted.pdf", width = SW + 0.5, height = SH + 0.3); par_journal()
+plot(new_data$constructor_dominance[new_data$teammate_threat == 0],
+     new_data$predicted_prob[new_data$teammate_threat == 0],
+     type = "l", col = pal["navy"], lwd = 2.5, ylim = c(0, 1),
+     xlab = "Constructor dominance",
+     ylab = "P(qualifying underperformance)")
+lines(new_data$constructor_dominance[new_data$teammate_threat == 1],
+      new_data$predicted_prob[new_data$teammate_threat == 1],
+      col = pal["coral"], lwd = 2.5)
+legend("topright", c("No teammate threat", "Teammate threat"),
+       col = c(pal["navy"], pal["coral"]), lwd = 2.5, bty = "n", cex = 0.85)
+dev.off()
+
+cat("All 11 publication panels written to figures/.\n")
+```
+```{r final-publication-figures, results='hold', fig.show='hide', warning=FALSE, message=FALSE}
+dir.create("figures", showWarnings = FALSE)
+
+pal <- c(navy = "#1f3a5f", coral = "#c14e4e", olive = "#7e8a3e",
+         gray = "#7a7a7a", gold = "#d4a017", teal = "#2e7d7d",
+         lightgray = "#d8d8d8")
+
+# Inline par settings — paste this string of args after every pdf()
+PAR_ARGS <- list(family = "sans", cex.lab = 0.95, cex.axis = 0.85,
+                 mar = c(4.2, 4.2, 1.0, 1.0), mgp = c(2.4, 0.7, 0),
+                 tcl = -0.3, bty = "l",
+                 col.axis = "gray30", col.lab = "gray20", fg = "gray40")
+
+# Laakso-Taagepera ENC
+team_pts <- table_a$driver1_points + table_a$driver2_points
+team_pts[team_pts == 0] <- NA
+p1 <- table_a$driver1_points / team_pts
+p2 <- table_a$driver2_points / team_pts
+table_a$enc <- 1 / (p1^2 + p2^2)
+cat("ENC mean:", round(mean(table_a$enc, na.rm = TRUE), 3),
+    "; cor with wdc_margin:",
+    round(cor(table_a$enc, table_a$wdc_margin, use = "complete.obs"), 3), "\n")
+
+SW <- 4.2; SH <- 3.4
+FW <- 6.5; FH <- 4.5
+
+# === FIGURE 1 ===
+pdf("figures/fig1a_cd_vs_wdc.pdf", width = SW, height = SH)
+do.call(par, PAR_ARGS)
+plot(table_a$constructor_dominance, table_a$wdc_margin, pch = 19,
+     col = pal["navy"], cex = 0.85,
+     xlab = "Constructor dominance", ylab = "External WDC margin")
+abline(lm(wdc_margin ~ constructor_dominance, data = table_a),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig1b_parity_hist.pdf", width = SW, height = SH)
+do.call(par, PAR_ARGS)
+hist(table_a$teammate_parity, breaks = 15, col = pal["lightgray"],
+     border = "gray50", xlab = "Teammate parity", ylab = "Frequency", main = "")
+abline(v = median(table_a$teammate_parity, na.rm = TRUE),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+pdf("figures/fig1c_resid_vs_parity.pdf", width = SW, height = SH)
+do.call(par, PAR_ARGS)
+plot(table_a$teammate_parity, table_a$resid_simple, pch = 19,
+     col = pal["navy"], cex = 0.85,
+     xlab = "Teammate parity",
+     ylab = "Residual: realized - predicted WDC margin")
+abline(h = 0, col = "gray60", lty = 3)
+abline(lm(resid_simple ~ teammate_parity, data = table_a),
+       col = pal["coral"], lwd = 2)
+dev.off()
+
+pdf("figures/fig1d_box_translation.pdf", width = SW, height = SH)
+do.call(par, PAR_ARGS)
+boxplot(teammate_parity ~ translation_failed, data = table_a,
+        col = c(pal["coral"], pal["navy"]), border = "gray30",
+        names = c("Failed", "Succeeded"), ylab = "Teammate parity", xlab = "")
+dev.off()
+
+# === FIGURE 2 ===
+pdf("figures/fig2_bootstrap_interaction.pdf", width = FW, height = FH)
+do.call(par, PAR_ARGS)
+ci_int <- quantile(boot_int, c(0.025, 0.975), na.rm = TRUE)
+hist(boot_int, breaks = 50, col = pal["lightgray"], border = "gray50",
+     xlab = expression(hat(beta)[3]*": coefficient on "*D %*% T),
+     ylab = "Frequency", main = "")
+abline(v = ci_int, col = pal["coral"], lwd = 2)
+abline(v = confint(final_model, "constructor_dominance:teammate_parity"),
+       col = pal["navy"], lwd = 2, lty = 2)
+legend("topleft", c("Bootstrap 95% CI", "Parametric 95% CI"),
+       col = c(pal["coral"], pal["navy"]), lty = c(1, 2), lwd = 2,
+       bty = "n", cex = 0.85)
+dev.off()
+
+# === FIGURE 3 ===
+pdf("figures/fig3a_top_spoiler.pdf", width = SW + 0.5, height = SH + 0.3)
+do.call(par, PAR_ARGS)
+par(mar = c(4.2, 4.5, 1.0, 1.0))   # widen left margin for year labels
+top10 <- table_a[order(-table_a$spoiler_magnitude), ][1:10, ]
+barplot(rev(top10$spoiler_magnitude), names.arg = rev(top10$year),
+        horiz = TRUE, las = 1, col = pal["coral"], border = "gray30",
+        xlab = "Spoiler magnitude (normalized)", cex.names = 0.85)
+dev.off()
+
+pdf("figures/fig3b_spoiler_vs_parity.pdf", width = SW + 0.5, height = SH + 0.3)
+do.call(par, PAR_ARGS)
+plot(table_a$teammate_parity, table_a$spoiler_magnitude,
+     pch = 19, col = pal["navy"], cex = 0.85,
+     xlab = "Teammate parity", ylab = "Spoiler magnitude")
+abline(lm(spoiler_magnitude ~ teammate_parity, data = table_a),
+       col = pal["coral"], lwd = 2, lty = 2)
+hl <- c(1988, 2016, 2002)
+hi <- table_a[table_a$year %in% hl, ]
+points(hi$teammate_parity, hi$spoiler_magnitude, pch = 21,
+       bg = pal["gold"], col = pal["coral"], cex = 1.6, lwd = 1.5)
+text(hi$teammate_parity, hi$spoiler_magnitude, labels = hi$year,
+     pos = 4, cex = 0.8, col = pal["coral"])
+dev.off()
+
+# === FIGURE 4 ===
+pdf("figures/fig4_quantile.pdf", width = FW, height = FH)
+do.call(par, PAR_ARGS)
+inter    <- sapply(qr_list, function(m) coef(m)["constructor_dominance:teammate_parity"])
+inter_se <- sapply(qr_list, function(m) {
+  s <- summary(m, se = "boot", R = 500, covariance = TRUE)
+  s$coefficients["constructor_dominance:teammate_parity", 2]
+})
+ols_inter <- coef(final_model)["constructor_dominance:teammate_parity"]
+plot(taus, inter, type = "b", pch = 19, col = pal["navy"], cex = 1.2,
+     ylim = range(c(inter - 2*inter_se, inter + 2*inter_se, ols_inter, 0)),
+     xlab = expression(tau~"(quantile of WDC margin)"),
+     ylab = expression(hat(beta)[3]*" (D x T)"))
+arrows(taus, inter - 1.96*inter_se, taus, inter + 1.96*inter_se,
+       angle = 90, code = 3, length = 0.05, col = pal["navy"])
+abline(h = ols_inter, col = pal["coral"], lwd = 2, lty = 2)
+abline(h = 0, col = "gray70", lty = 3)
+legend("topright", c("Quantile (95% CI)", "OLS estimate"),
+       col = c(pal["navy"], pal["coral"]), pch = c(19, NA), lty = c(NA, 2),
+       lwd = 2, bty = "n", cex = 0.9)
+dev.off()
+
+# === FIGURE 5 ===
+pdf("figures/fig5_diminishing_returns.pdf", width = FW, height = FH)
+do.call(par, PAR_ARGS)
+sub <- table_a[!is.na(table_a$d1_usage) & !is.na(table_a$d2_usage), ]
+mod_e_partial <- lm(d1_norm_points ~ d1_usage + constructor_dominance, data = sub)
+plot(sub$d2_usage, residuals(mod_e_partial),
+     pch = 19, col = pal["navy"], cex = 0.85,
+     xlab = "Teammate usage (share of team's top-3 finishes)",
+     ylab = "Residualized lead-driver normalized points")
+abline(h = 0, col = "gray60", lty = 3)
+abline(lm(residuals(mod_e_partial) ~ sub$d2_usage),
+       col = pal["coral"], lwd = 2, lty = 2)
+dev.off()
+
+# === FIGURE 6 ===
+pdf("figures/fig6a_panel_fe.pdf", width = SW + 0.5, height = SH + 0.3)
+do.call(par, PAR_ARGS)
+plot(spec_tbl$spec, spec_tbl$est, pch = 19, col = pal["navy"], cex = 1.2,
+     ylim = range(c(spec_tbl$lower, spec_tbl$upper, 0)),
+     xaxt = "n", xlab = "Specification",
+     ylab = expression(hat(beta)[1]*": teammate quali baseline"))
+axis(1, at = 1:4, labels = c("OLS", "+Driver", "+Year", "+Inter."), cex.axis = 0.85)
+arrows(spec_tbl$spec, spec_tbl$lower, spec_tbl$spec, spec_tbl$upper,
+       angle = 90, code = 3, length = 0.05, col = pal["navy"])
+abline(h = 0, lty = 3, col = "gray60")
+dev.off()
+
+pdf("figures/fig6b_logit_predicted.pdf", width = SW + 0.5, height = SH + 0.3)
+do.call(par, PAR_ARGS)
+plot(new_data$constructor_dominance[new_data$teammate_threat == 0],
+     new_data$predicted_prob[new_data$teammate_threat == 0],
+     type = "l", col = pal["navy"], lwd = 2.5, ylim = c(0, 1),
+     xlab = "Constructor dominance",
+     ylab = "P(qualifying underperformance)")
+lines(new_data$constructor_dominance[new_data$teammate_threat == 1],
+      new_data$predicted_prob[new_data$teammate_threat == 1],
+      col = pal["coral"], lwd = 2.5)
+legend("topright", c("No teammate threat", "Teammate threat"),
+       col = c(pal["navy"], pal["coral"]), lwd = 2.5, bty = "n", cex = 0.85)
+dev.off()
+
+cat("11 panels saved to figures/.\n")
+```
